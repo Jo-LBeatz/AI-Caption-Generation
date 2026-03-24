@@ -1,0 +1,13 @@
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.vscode
+**/dist
+**/uploads
+**/.git
+**/.next
+**/.cache
+**/coverage
+**/build
+**/.DS_Store

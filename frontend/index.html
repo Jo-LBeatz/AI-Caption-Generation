@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <!-- PWA & Mobile -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Jo-L Captions" />
+    <meta name="application-name" content="Jo-L Captions" />
+
+    <!-- Theme -->
+    <meta name="theme-color" content="#b75000" />
+    <meta name="msapplication-TileColor" content="#050504" />
+
+    <!-- SEO & Social -->
+    <meta name="description" content="Professional AI-powered video captioning. Generate SRT files and burn captions into your videos." />
+    <meta property="og:title" content="Captions by Jo-L" />
+    <meta property="og:description" content="Professional AI-powered video captioning for creators." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Icons -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <title>Captions by Jo-L</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Service Worker Registration -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
+  </body>
+</html>

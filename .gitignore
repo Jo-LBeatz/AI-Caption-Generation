@@ -1,0 +1,38 @@
+# Environments
+.env
+
+# Editor directories and files
+.vscode
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Dependencies
+frontend/node_modules/
+backend/venv/
+backend/env/
+
+# Build and deployment
+frontend/dist/
+frontend/build/
+
+# App specifics
+uploads/
+google_credentials.json
