@@ -5,15 +5,51 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { AnimatedDownload } from '@/components/ui/animated-download';
 import { AuthPage } from '@/components/auth/AuthPage';
+import { LanguageAccentDialog } from '@/components/LanguageAccentDialog';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000');
+
+interface TopCandidate {
+  language: string;
+  probability: number;
+}
 
 interface JobStatus {
-  status: 'processing' | 'extracting_audio' | 'transcribing' | 'checking_faith_alignment' | 'embedding_captions' | 'completed' | 'failed';
+  status:
+    | 'processing'
+    | 'extracting_audio'
+    | 'detecting_language'
+    | 'awaiting_user_confirmation'
+    | 'transcribing'
+    | 'generating_srt'
+    | 'checking_content'
+    | 'embedding_captions'
+    | 'completed'
+    | 'failed';
   progress: number;
   filename: string;
   video_burned?: boolean;
   error?: string;
+  detected_language?: string;
+  detected_probability?: number;
+  detected_top_candidates?: TopCandidate[];
+  final_language?: string;
+}
+
+function getStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    processing: 'Initializing...',
+    extracting_audio: 'Extracting Audio...',
+    detecting_language: 'Detecting Language...',
+    awaiting_user_confirmation: 'Awaiting Confirmation',
+    transcribing: 'Transcribing...',
+    generating_srt: 'Generating Captions...',
+    checking_content: 'Quality Check...',
+    embedding_captions: 'Burning Captions...',
+    completed: 'Complete',
+    failed: 'Failed',
+  };
+  return labels[status] || status.replace(/_/g, ' ').toUpperCase();
 }
 
 export default function App() {
@@ -23,6 +59,9 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [srtContent, setSrtContent] = useState<string>('');
   const [embedCaptions, setEmbedCaptions] = useState(false);
+
+  // Language confirmation state
+  const [isConfirming, setIsConfirming] = useState(false);
 
   // Auth State
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
@@ -59,7 +98,9 @@ export default function App() {
   // Poll status when jobId exists
   useEffect(() => {
     let interval: any;
-    if (jobId && token && (!status || (status.status !== 'completed' && status.status !== 'failed'))) {
+    const terminalStatuses = ['completed', 'failed', 'awaiting_user_confirmation'];
+
+    if (jobId && token && (!status || !terminalStatuses.includes(status.status))) {
       interval = setInterval(async () => {
         try {
           const response = await axios.get<JobStatus>(`${API_BASE_URL}/status/${jobId}`, {
@@ -78,7 +119,7 @@ export default function App() {
             } catch (e) {
               console.error("SRT fetch error", e);
             }
-          } else if (response.data.status === 'failed') {
+          } else if (response.data.status === 'failed' || response.data.status === 'awaiting_user_confirmation') {
             clearInterval(interval);
           }
         } catch (error) {
@@ -87,7 +128,7 @@ export default function App() {
             logout();
           }
         }
-      }, 2000);
+      }, 1500);
     }
     return () => clearInterval(interval);
   }, [jobId, status, token]);
@@ -101,12 +142,16 @@ export default function App() {
     formData.append('file', file);
 
     try {
-      const response = await axios.post(`${API_BASE_URL}/upload?embed_captions=${embedCaptions}`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-          'Authorization': `Bearer ${token}`
-        },
-      });
+      const response = await axios.post(
+        `${API_BASE_URL}/upload?embed_captions=${embedCaptions}`,
+        formData,
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+            'Authorization': `Bearer ${token}`
+          },
+        }
+      );
       setJobId(response.data.job_id);
     } catch (error) {
       console.error('Upload error:', error);
@@ -120,12 +165,78 @@ export default function App() {
     }
   };
 
+  const handleLanguageConfirm = async (language: string, accentId: string) => {
+    if (!jobId || !token) return;
+    setIsConfirming(true);
+    try {
+      await axios.post(
+        `${API_BASE_URL}/confirm-language/${jobId}`,
+        { language, accent_id: accentId },
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+      // Resume polling — clear awaiting_user_confirmation status
+      setStatus((prev) => prev ? { ...prev, status: 'transcribing', progress: 25 } : prev);
+    } catch (error) {
+      console.error('Language confirm error:', error);
+      alert('Failed to confirm language. Please try again.');
+    } finally {
+      setIsConfirming(false);
+    }
+  };
+
+  const handleDownloadSrt = async () => {
+    if (!jobId || !token) return;
+    try {
+      const response = await axios.get(`${API_BASE_URL}/download/${jobId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `captions_${jobId.slice(0, 8)}.srt`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Download SRT error", e);
+      alert("Failed to download SRT file.");
+    }
+  };
+
+  const handleDownloadVideo = async () => {
+    if (!jobId || !token) return;
+    try {
+      const response = await axios.get(`${API_BASE_URL}/download-video/${jobId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        responseType: 'blob'
+      });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video'}_captioned.mp4`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Download video error", e);
+      alert("Failed to download video file.");
+    }
+  };
+
   const reset = () => {
     setFile(null);
     setJobId(null);
     setStatus(null);
     setSrtContent('');
+    setIsConfirming(false);
   };
+
+  // Determine which main view to show
+  const isAwaitingConfirmation = status?.status === 'awaiting_user_confirmation';
+  const isProcessing = jobId && status && !isAwaitingConfirmation && status.status !== 'completed' && status.status !== 'failed';
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen px-4 py-12 md:px-8 bg-[#050504]">
@@ -141,17 +252,21 @@ export default function App() {
             animate={{ scale: 1 }}
             className="text-4xl md:text-5xl font-black title-gradient mb-3 tracking-tighter"
           >
-            Captions by Jo-L
+            Captions by REGULA
           </motion.h1>
           <p className="text-stone-400 text-sm md:text-base font-medium">
-            What is the good, the true and the beautiful video that you want to get captions for?
+            AI-powered captions for every language, every accent — with maximum precision.
           </p>
         </div>
 
         {/* Main Content Area */}
         <AnimatePresence mode="wait">
+
+          {/* ── Auth ── */}
           {!token ? (
             <AuthPage key="auth" apiBaseUrl={API_BASE_URL} onAuthSuccess={handleAuthSuccess} />
+
+          /* ── Upload ── */
           ) : !jobId ? (
             <motion.div
               key="upload"
@@ -162,8 +277,7 @@ export default function App() {
             >
               <div className="flex flex-col items-center justify-center space-y-8">
                 <div
-                  className={`w-full aspect-video md:aspect-[21/9] border-2 border-dashed rounded-3xl flex flex-col items-center justify-center transition-all cursor-pointer group ${file ? 'border-amber-500/50 bg-amber-500/5' : 'border-white/10 hover:border-white/20 hover:bg-white/[0.02]'
-                    }`}
+                  className={`w-full aspect-video md:aspect-[21/9] border-2 border-dashed rounded-3xl flex flex-col items-center justify-center transition-all cursor-pointer group ${file ? 'border-amber-500/50 bg-amber-500/5' : 'border-white/10 hover:border-white/20 hover:bg-white/[0.02]'}`}
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={handleDrop}
                   onClick={() => fileInputRef.current?.click()}
@@ -192,8 +306,8 @@ export default function App() {
                       <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                         <Upload className="text-stone-400 group-hover:text-amber-500 transition-colors" size={32} />
                       </div>
-                      <h3 className="text-white font-black text-xl tracking-tight">Drop your masterpiece here</h3>
-                      <p className="text-stone-500 text-sm mt-1">MP4, MOV, or MKV (up to 2h)</p>
+                      <h3 className="text-white font-black text-xl tracking-tight">Drop your video here</h3>
+                      <p className="text-stone-500 text-sm mt-1">MP4, MOV, MKV, AVI, WebM — any language</p>
                     </>
                   )}
                 </div>
@@ -211,7 +325,7 @@ export default function App() {
                   className="w-full h-16 bg-white hover:bg-amber-500 text-black font-black text-xl rounded-2xl shadow-lg transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-30 disabled:hover:scale-100"
                 >
                   {isUploading ? (
-                    <><Loader2 className="animate-spin mr-3" size={24} /> Starting engine...</>
+                    <><Loader2 className="animate-spin mr-3" size={24} />Uploading &amp; Analysing...</>
                   ) : (
                     <>+ Generate Captions</>
                   )}
@@ -225,7 +339,27 @@ export default function App() {
                 </button>
               </div>
             </motion.div>
-          ) : (
+
+          /* ── Language Confirmation Dialog ── */
+          ) : isAwaitingConfirmation ? (
+            <motion.div
+              key="lang-confirm"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-stone-900/40 backdrop-blur-xl border border-white/5 rounded-3xl p-8 md:p-10 shadow-2xl"
+            >
+              <LanguageAccentDialog
+                detectedLanguage={status?.detected_language || 'en'}
+                detectedProbability={status?.detected_probability || 0}
+                topCandidates={status?.detected_top_candidates || []}
+                onConfirm={handleLanguageConfirm}
+                isConfirming={isConfirming}
+              />
+            </motion.div>
+
+          /* ── Processing ── */
+          ) : isProcessing ? (
             <motion.div
               key="processing"
               initial={{ scale: 0.95, opacity: 0 }}
@@ -233,31 +367,44 @@ export default function App() {
               exit={{ scale: 0.95, opacity: 0 }}
               className="bg-stone-900/40 backdrop-blur-xl border border-white/5 rounded-3xl p-8 md:p-12 shadow-2xl"
             >
-              {status?.status !== 'completed' && status?.status !== 'failed' ? (
-                <div className="flex flex-col items-center space-y-12 py-6 text-center">
-                  <AnimatedDownload
-                    progress={status?.progress || 0}
-                    label={status?.status?.replace('_', ' ').toUpperCase() || 'INITIALIZING'}
-                    className="mx-auto"
-                    isAnimating={true}
-                    timeRemaining={
-                      status?.progress && status.progress > 0 ?
-                        `${Math.floor(((100 - status.progress) * 1.5) / 60)}min ${Math.floor(((100 - status.progress) * 1.5) % 60).toString().padStart(2, '0')}sec` :
-                        "Calculating..."
-                    }
-                  />
-
-                  <div className="space-y-3">
-                    <h3 className="font-black text-white text-3xl tracking-tighter">
-                      {status?.status === 'transcribing' ? 'Transcribing Your Story...' :
-                        status?.status === 'checking_faith_alignment' ? 'Finalizing Quality Alignment...' :
-                          status?.status === 'embedding_captions' ? 'Polishing the Movie...' :
-                            'Ignition in Progress...'}
-                    </h3>
-                    <p className="text-stone-500 text-sm font-medium">Please keep this window open while the engines hum.</p>
-                  </div>
+              <div className="flex flex-col items-center space-y-12 py-6 text-center">
+                <AnimatedDownload
+                  progress={status?.progress || 0}
+                  label={getStatusLabel(status?.status || '')}
+                  className="mx-auto"
+                  isAnimating={true}
+                  timeRemaining={
+                    status?.progress && status.progress > 0
+                      ? `${Math.floor(((100 - status.progress) * 1.5) / 60)}min ${Math.floor(((100 - status.progress) * 1.5) % 60).toString().padStart(2, '0')}sec`
+                      : "Calculating..."
+                  }
+                />
+                <div className="space-y-3">
+                  <h3 className="font-black text-white text-3xl tracking-tighter">
+                    {status?.status === 'transcribing' ? 'Transcribing Your Audio...' :
+                     status?.status === 'generating_srt' ? 'Generating Captions...' :
+                     status?.status === 'embedding_captions' ? 'Burning Captions into Video...' :
+                     status?.status === 'extracting_audio' ? 'Extracting Audio Track...' :
+                     status?.status === 'detecting_language' ? 'Detecting Language...' :
+                     'Processing...'}
+                  </h3>
+                  <p className="text-stone-500 text-sm font-medium">
+                    Please keep this window open. Whisper large-v3 is working.
+                  </p>
                 </div>
-              ) : status?.status === 'completed' ? (
+              </div>
+            </motion.div>
+
+          /* ── Completed / Failed ── */
+          ) : (
+            <motion.div
+              key="result"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-stone-900/40 backdrop-blur-xl border border-white/5 rounded-3xl p-8 md:p-12 shadow-2xl"
+            >
+              {status?.status === 'completed' ? (
                 <div className="flex flex-col md:flex-row gap-8 items-start">
                   <div className="flex-1 space-y-6 w-full">
                     <div className="flex items-center gap-4 p-6 bg-amber-500/10 border border-amber-500/20 rounded-3xl">
@@ -271,22 +418,18 @@ export default function App() {
                     </div>
 
                     <div className="space-y-3">
-                      <a href={`${API_BASE_URL}/download/${jobId}?authorization=Bearer ${token}`} download className="block">
-                        <Button className="w-full h-12 text-base font-bold rounded-2xl bg-stone-800 hover:bg-stone-700 text-slate-200">
-                          <Download className="mr-2" size={18} /> Get .SRT File
-                        </Button>
-                      </a>
+                      <Button onClick={handleDownloadSrt} className="w-full h-12 text-base font-bold rounded-2xl bg-stone-800 hover:bg-stone-700 text-slate-200">
+                        <Download className="mr-2" size={18} /> Get .SRT File
+                      </Button>
 
                       {status?.video_burned && (
-                        <a href={`${API_BASE_URL}/download-video/${jobId}?authorization=Bearer ${token}`} download className="block">
-                          <Button className="w-full h-16 text-xl font-black rounded-2xl bg-gradient-to-r from-amber-600 to-amber-700 hover:opacity-90 shadow-xl shadow-amber-900/20">
-                            <PlayCircle className="mr-2" size={24} /> Download Final Video
-                          </Button>
-                        </a>
+                        <Button onClick={handleDownloadVideo} className="w-full h-16 text-xl font-black rounded-2xl bg-gradient-to-r from-amber-600 to-amber-700 hover:opacity-90 shadow-xl shadow-amber-900/20">
+                          <PlayCircle className="mr-2" size={24} /> Download Final Video
+                        </Button>
                       )}
 
                       <Button variant="ghost" onClick={reset} className="w-full text-stone-500 hover:text-white uppercase text-xs font-black tracking-widest">
-                        Process Another Masterpiece
+                        Process Another Video
                       </Button>
 
                       <button onClick={logout} className="w-full mt-4 text-stone-600 hover:text-stone-400 text-[10px] font-black uppercase tracking-[0.2em] flex items-center justify-center gap-2">
@@ -328,17 +471,19 @@ export default function App() {
               )}
             </motion.div>
           )}
+
         </AnimatePresence>
 
-        {/* Footer Details */}
+        {/* Footer */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.5 }}
           className="mt-10 flex flex-wrap justify-center gap-6 text-stone-500 text-[10px] font-black uppercase tracking-[0.2em]"
         >
-          <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> Professional Standard</span>
-          <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> Pro-Grade SRT</span>
+          <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> 99 Languages</span>
+          <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> All Accents</span>
+          <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> Whisper large-v3</span>
           <span className="flex items-center gap-1.5"><CheckCircle2 size={12} className="text-amber-500/50" /> Privacy Focused</span>
         </motion.div>
       </motion.div>

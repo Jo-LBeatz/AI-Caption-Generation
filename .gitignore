@@ -36,3 +36,14 @@ frontend/build/
 # App specifics
 uploads/
 google_credentials.json
+*.db
+*.log
+
+# PyInstaller & Standalone build artifacts
+build/
+dist/
+installer_output/
+backend/.venv/
+backend/bin/*.exe
+backend/bin/*.txt
+

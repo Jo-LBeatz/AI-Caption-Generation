@@ -1,0 +1,23 @@
+# requirements_standalone.txt
+# Dependencies for the standalone (non-Docker) version.
+# Differences from requirements.txt:
+#   - celery removed (replaced by FastAPI BackgroundTasks / threading)
+#   - redis removed (jobs use in-memory dict; users use SQLite)
+#   - aiofiles added for StaticFiles support
+#   - tkinterweb added for native OS window (pure-Python, no CLR/COM deps)
+#   - numpy pinned for PyInstaller + Whisper stability
+
+fastapi
+uvicorn[standard]
+python-multipart
+openai-whisper
+ffmpeg-python
+pydantic[email]
+python-dotenv
+aiofiles
+passlib
+bcrypt==4.0.1
+python-jose[cryptography]
+dnspython
+numpy
+tkinterweb
