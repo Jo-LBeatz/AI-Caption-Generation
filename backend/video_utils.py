@@ -2,6 +2,7 @@ import ffmpeg
 import os
 import sys
 import logging
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,8 @@ def get_ffmpeg_bin() -> str:
 def embed_subtitles(video_path, srt_path, output_path):
     """
     Burn subtitles (.srt) into a video (.mp4) using FFmpeg.
-    Optimized for Windows path escaping, ultrafast x264 encoding, and multi-threading.
+    Optimized for Windows path escaping, GPU NVENC acceleration when available,
+    and multi-threaded ultrafast CPU encoding fallback.
     """
     try:
         logger.info(f"Burning subtitles from {srt_path} into {video_path}")
@@ -35,10 +37,28 @@ def embed_subtitles(video_path, srt_path, output_path):
         clean_srt = os.path.abspath(srt_path).replace("\\", "/")
         escaped_srt = clean_srt.replace(":", "\\:")
 
-        # Fast encoding options:
-        # - preset: ultrafast for maximum re-encoding speed
-        # - threads: 0 for utilizing all available CPU logical cores
-        # - vcodec: libx264, pix_fmt: yuv420p for max compatibility across players
+        # Try GPU NVENC acceleration first if CUDA is available
+        if torch.cuda.is_available():
+            try:
+                (
+                    ffmpeg
+                    .input(video_path)
+                    .output(
+                        output_path,
+                        vf=f"subtitles='{escaped_srt}'",
+                        vcodec="h264_nvenc",
+                        acodec="copy",
+                        preset="p1",
+                        pix_fmt="yuv420p"
+                    )
+                    .run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
+                )
+                logger.info(f"Subtitles burned via GPU NVENC successfully. Output: {output_path}")
+                return True
+            except Exception as gpu_err:
+                logger.warning(f"GPU NVENC burn-in failed ({gpu_err}). Falling back to CPU ultrafast.")
+
+        # Multi-threaded CPU ultrafast encoding
         (
             ffmpeg
             .input(video_path)
@@ -63,4 +83,3 @@ def embed_subtitles(video_path, srt_path, output_path):
     except Exception as e:
         logger.error(f"Error burning subtitles: {e}")
         return False
-

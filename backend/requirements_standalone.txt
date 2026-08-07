@@ -11,6 +11,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 openai-whisper
+faster-whisper
 ffmpeg-python
 pydantic[email]
 python-dotenv
