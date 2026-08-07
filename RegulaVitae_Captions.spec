@@ -18,6 +18,18 @@ whisper_datas = collect_data_files("whisper")
 # Collect tiktoken encoder data
 tiktoken_datas = collect_data_files("tiktoken")
 
+# Collect faster-whisper data files (tokenizer assets)
+try:
+    faster_whisper_datas = collect_data_files("faster_whisper")
+except Exception:
+    faster_whisper_datas = []
+
+# Collect ctranslate2 dynamic libraries
+try:
+    ctranslate2_libs = collect_dynamic_libs("ctranslate2")
+except Exception:
+    ctranslate2_libs = []
+
 # Collect pywebview data files if present
 try:
     webview_datas = collect_data_files("webview")
@@ -32,7 +44,7 @@ a = Analysis(
     binaries=[
         # Bundle ffmpeg.exe into the bin/ subdirectory of the package
         ("backend/bin/ffmpeg.exe", "bin"),
-    ],
+    ] + ctranslate2_libs,
     datas=[
         # React production build
         ("frontend/dist", "frontend_dist"),
@@ -43,7 +55,7 @@ a = Analysis(
         ("backend/video_utils.py", "."),
         ("backend/worker.py",      "."),
         ("backend/main.py",        "."),
-    ] + whisper_datas + tiktoken_datas + webview_datas,
+    ] + whisper_datas + tiktoken_datas + faster_whisper_datas + webview_datas,
     hiddenimports=[
         # ── Entry point modules (same process, must be importable) ──────────
         "main",
@@ -63,6 +75,21 @@ a = Analysis(
         "tiktoken",
         "tiktoken_ext",
         "tiktoken_ext.openai_public",
+        # ── faster-whisper / CTranslate2 ─────────────────────────────────────
+        "faster_whisper",
+        "faster_whisper.audio",
+        "faster_whisper.feature_extractor",
+        "faster_whisper.tokenizer",
+        "faster_whisper.transcribe",
+        "faster_whisper.utils",
+        "faster_whisper.vad",
+        "ctranslate2",
+        "av",
+        "onnxruntime",
+        "onnxruntime.capi.onnxruntime_inference_collection",
+        "huggingface_hub",
+        "huggingface_hub.file_download",
+        "tokenizers",
         # ── Uvicorn internals (dynamically loaded, never auto-detected) ───────
         "uvicorn",
         "uvicorn.logging",
