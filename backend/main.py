@@ -1,5 +1,5 @@
 """
-main.py — Standalone version of the Captions by REGULA API.
+main.py — Standalone version of the Captions by RegulaVitae API.
 
 Key differences from the Docker version:
   - No Redis: job state lives in an in-memory dict (jobs.py → JOB_STORE)
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # App init + DB init
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Captions by REGULA API", description="AI Caption Generation Engine")
+app = FastAPI(title="Captions by RegulaVitae API", description="AI Caption Generation Engine")
 database.init_db()
 
 # ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ async def export_users_csv(secret: Optional[str] = None):
         writer.writerow(u)
 
     response = Response(content=output.getvalue())
-    response.headers["Content-Disposition"] = "attachment; filename=regula_users.csv"
+    response.headers["Content-Disposition"] = "attachment; filename=regulavitae_users.csv"
     response.headers["Content-Type"] = "text/csv"
     return response
 

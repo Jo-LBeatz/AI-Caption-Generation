@@ -1,10 +1,10 @@
-# REGULA_Captions.spec
-# PyInstaller spec file for Captions by REGULA.
+# RegulaVitae_Captions.spec
+# PyInstaller spec file for Captions by RegulaVitae.
 #
 # Usage (from project root, with venv active):
-#   pyinstaller REGULA_Captions.spec
+#   pyinstaller RegulaVitae_Captions.spec
 #
-# Output: dist/REGULA_Captions/   — a folder containing the .exe and all dependencies.
+# Output: dist/RegulaVitae_Captions/   — a folder containing the .exe and all dependencies.
 
 import sys
 import os
@@ -186,12 +186,12 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="REGULA_Captions",
+    name="RegulaVitae_Captions",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,               # Compress with UPX if available (reduces size ~20%)
-    console=False,          # No console window — errors logged to regula_launcher.log
+    console=False,          # No console window — errors logged to regulavitae_launcher.log
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -208,5 +208,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="REGULA_Captions",
+    name="RegulaVitae_Captions",
 )

@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 color 0E
-title REGULA Captions — Standalone Build
+title RegulaVitae Captions — Standalone Build
 
 echo.
 echo ============================================================
-echo   REGULA Captions — Standalone Build Script
+echo   RegulaVitae Captions — Standalone Build Script
 echo ============================================================
 echo.
 
@@ -89,25 +89,25 @@ echo.
 :: ============================================================
 
 echo [3/5] Running PyInstaller (this may take 5-15 minutes)...
-pyinstaller REGULA_Captions.spec --noconfirm
+pyinstaller RegulaVitae_Captions.spec --noconfirm
 if errorlevel 1 (
     echo  [ERROR] PyInstaller failed. Check the output above for details.
     pause
     exit /b 1
 )
-echo  [OK] PyInstaller complete. Output: dist\REGULA_Captions\
+echo  [OK] PyInstaller complete. Output: dist\RegulaVitae_Captions\
 echo.
 
 :: ============================================================
 :: STEP 4: Test the executable (optional quick check)
 :: ============================================================
 
-if not exist "dist\REGULA_Captions\REGULA_Captions.exe" (
-    echo  [ERROR] dist\REGULA_Captions\REGULA_Captions.exe was not created.
+if not exist "dist\RegulaVitae_Captions\RegulaVitae_Captions.exe" (
+    echo  [ERROR] dist\RegulaVitae_Captions\RegulaVitae_Captions.exe was not created.
     pause
     exit /b 1
 )
-echo [4/5] Executable verified: dist\REGULA_Captions\REGULA_Captions.exe
+echo [4/5] Executable verified: dist\RegulaVitae_Captions\RegulaVitae_Captions.exe
 echo.
 
 :: ============================================================
@@ -124,16 +124,16 @@ if not exist "%ISCC_PATH%" (
 if exist "%ISCC_PATH%" (
     echo  Inno Setup found. Creating installer...
     mkdir installer_output 2>NUL
-    "%ISCC_PATH%" installer\regula_setup.iss
+    "%ISCC_PATH%" installer\regulavitae_setup.iss
     if errorlevel 1 (
         echo  [WARNING] Inno Setup compilation failed. The .exe folder is still usable.
     ) else (
-        echo  [OK] Installer created: installer_output\REGULA_Captions_Setup_v1.0.0.exe
+        echo  [OK] Installer created: installer_output\RegulaVitae_Captions_Setup_v1.0.0.exe
     )
 ) else (
     echo  [SKIP] Inno Setup not found. Skipping installer creation.
     echo         Install from https://jrsoftware.org/isinfo.php and re-run this script,
-    echo         or manually compile installer\regula_setup.iss.
+    echo         or manually compile installer\regulavitae_setup.iss.
 )
 
 echo.
@@ -141,11 +141,11 @@ echo ============================================================
 echo   BUILD COMPLETE
 echo ============================================================
 echo.
-echo   Distributable folder : dist\REGULA_Captions\
-if exist "installer_output\REGULA_Captions_Setup_v1.0.0.exe" (
-    echo   Windows installer    : installer_output\REGULA_Captions_Setup_v1.0.0.exe
+echo   Distributable folder : dist\RegulaVitae_Captions\
+if exist "installer_output\RegulaVitae_Captions_Setup_v1.0.0.exe" (
+    echo   Windows installer    : installer_output\RegulaVitae_Captions_Setup_v1.0.0.exe
 )
 echo.
-echo   To test locally, run: dist\REGULA_Captions\REGULA_Captions.exe
+echo   To test locally, run: dist\RegulaVitae_Captions\RegulaVitae_Captions.exe
 echo.
 pause

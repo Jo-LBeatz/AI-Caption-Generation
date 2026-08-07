@@ -16,6 +16,7 @@ import whisper
 import ffmpeg
 import logging
 import numpy as np
+import torch
 
 from jobs import JOB_STORE
 from video_utils import embed_subtitles
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model management
 # ---------------------------------------------------------------------------
-MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3")
+MODEL_NAME = os.getenv("WHISPER_MODEL", "turbo")
 _model = None
 _model_lock = threading.Lock()
 
@@ -36,9 +37,14 @@ def get_model():
     global _model
     with _model_lock:
         if _model is None:
-            logger.info(f"Loading Whisper model: {MODEL_NAME}")
-            _model = whisper.load_model(MODEL_NAME)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            if device == "cpu":
+                num_cores = os.cpu_count() or 4
+                torch.set_num_threads(num_cores)
+            logger.info(f"Loading Whisper model '{MODEL_NAME}' on device '{device}'")
+            _model = whisper.load_model(MODEL_NAME, device=device)
     return _model
+
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +57,29 @@ def get_ffmpeg_bin() -> str:
     In development, look for backend/bin/ffmpeg.exe (or rely on system PATH).
     """
     if getattr(sys, "frozen", False):
-        return os.path.join(sys._MEIPASS, "bin", "ffmpeg.exe")
+        meipass = getattr(sys, "_MEIPASS", "")
+        bundled = os.path.join(meipass, "bin", "ffmpeg.exe")
+        if os.path.exists(bundled):
+            return bundled
     local_bin = os.path.join(os.path.dirname(__file__), "bin", "ffmpeg.exe")
     return local_bin if os.path.exists(local_bin) else "ffmpeg"
+
+
+def ensure_ffmpeg_on_path() -> str:
+    """Ensure the directory containing ffmpeg.exe is added to system PATH for Whisper internals."""
+    bin_path = get_ffmpeg_bin()
+    if bin_path != "ffmpeg" and os.path.exists(bin_path):
+        bin_dir = os.path.dirname(os.path.abspath(bin_path))
+        path_env = os.environ.get("PATH", "")
+        if bin_dir.lower() not in [p.lower() for p in path_env.split(os.pathsep)]:
+            os.environ["PATH"] = bin_dir + os.pathsep + path_env
+            logger.info(f"Added FFmpeg directory to PATH: {bin_dir}")
+    return bin_path
+
+
+# Ensure PATH is configured at module import time
+ensure_ffmpeg_on_path()
+
 
 
 def get_upload_dir() -> str:
@@ -95,7 +121,7 @@ def detect_language_from_audio(audio_path: str) -> dict:
     # Load and pad/trim to 30 seconds (whisper expects mel spectrogram)
     audio = whisper.load_audio(audio_path)
     audio = whisper.pad_or_trim(audio)
-    mel = whisper.log_mel_spectrogram(audio).to(model.device)
+    mel = whisper.log_mel_spectrogram(audio, n_mels=model.dims.n_mels).to(model.device)
 
     # Detect language
     _, probs = model.detect_language(mel)
@@ -256,16 +282,17 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
 
         model = get_model()
 
-        # Build transcription kwargs
+        # Build high-speed, high-precision transcription kwargs
+        is_cuda = torch.cuda.is_available()
         transcribe_kwargs = {
             "verbose": False,
             "task": "transcribe",
-            "beam_size": 5,
-            "best_of": 5,
-            "temperature": 0,
-            "condition_on_previous_text": True,
+            "beam_size": 1,                      # Greedy decoding (3x-5x faster than beam_size=5)
+            "best_of": 1,                        # Single pass
+            "temperature": 0.0,
+            "condition_on_previous_text": False, # Prevents hallucination loops & speeds up decoding
             "word_timestamps": False,
-            "fp16": False,  # CPU-safe default; GPU will auto-use fp16 if available
+            "fp16": is_cuda,                     # FP16 on CUDA GPU for 2x speedup, FP32 on CPU
         }
 
         # Apply language selection

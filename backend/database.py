@@ -1,7 +1,7 @@
 """
 database.py — SQLite-backed user persistence for the standalone app.
 Replaces Redis as the user credential store.
-The database file (regula.db) is stored next to the executable when
+The database file (regulavitae.db) is stored next to the executable when
 running as a PyInstaller bundle, or next to this file in development.
 """
 import sqlite3
@@ -22,7 +22,7 @@ def get_db_path() -> str:
     else:
         # Running in development — store next to this file
         base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "regula.db")
+    return os.path.join(base, "regulavitae.db")
 
 
 def get_connection() -> sqlite3.Connection:

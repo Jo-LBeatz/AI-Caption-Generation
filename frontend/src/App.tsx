@@ -252,7 +252,7 @@ export default function App() {
             animate={{ scale: 1 }}
             className="text-4xl md:text-5xl font-black title-gradient mb-3 tracking-tighter"
           >
-            Captions by REGULA
+            Captions by RegulaVitae
           </motion.h1>
           <p className="text-stone-400 text-sm md:text-base font-medium">
             AI-powered captions for every language, every accent — with maximum precision.

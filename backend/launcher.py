@@ -1,5 +1,5 @@
 """
-launcher.py — Entry point for the standalone Captions by REGULA desktop app.
+launcher.py — Entry point for the standalone Captions by RegulaVitae desktop app.
 
 This script:
   1. Adds the bundled bin/ directory to PATH so ffmpeg.exe is found automatically.
@@ -26,7 +26,7 @@ if getattr(sys, "frozen", False):
 else:
     _log_dir = os.path.dirname(os.path.abspath(__file__))
 
-_log_path = os.path.join(_log_dir, "regula_launcher.log")
+_log_path = os.path.join(_log_dir, "regulavitae_launcher.log")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"Launcher started. Log file: {_log_path}")
 
-APP_TITLE = "Captions by REGULA"
+APP_TITLE = "Captions by RegulaVitae"
 HOST = "127.0.0.1"
 
 
@@ -119,7 +119,7 @@ def _wait_for_server(timeout: float = 30.0) -> bool:
             logger.error(f"Server thread failed early: {_SERVER_ERROR}")
             return False
         try:
-            req = urllib.request.Request(URL, headers={"User-Agent": "RegulaLauncher/1.0"})
+            req = urllib.request.Request(URL, headers={"User-Agent": "RegulaVitaeLauncher/1.0"})
             with urllib.request.urlopen(req, timeout=2) as resp:
                 if resp.status in (200, 301, 302, 307, 404):
                     return True
