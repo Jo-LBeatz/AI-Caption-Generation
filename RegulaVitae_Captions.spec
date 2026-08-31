@@ -224,7 +224,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,              # Add an .ico path here to set a custom icon
+    icon="icon.ico",
 )
 
 coll = COLLECT(

@@ -46,4 +46,6 @@ installer_output/
 backend/.venv/
 backend/bin/*.exe
 backend/bin/*.txt
+.tmp/
+
 

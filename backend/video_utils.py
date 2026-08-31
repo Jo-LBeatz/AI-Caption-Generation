@@ -22,64 +22,103 @@ def get_ffmpeg_bin() -> str:
     return local_bin if os.path.exists(local_bin) else "ffmpeg"
 
 
-def embed_subtitles(video_path, srt_path, output_path):
+import subprocess
+
+def get_video_duration(video_path: str) -> float:
+    """Get the duration of a video in seconds using ffmpeg probe or fallback."""
+    try:
+        ffmpeg_bin = get_ffmpeg_bin()
+        probe = ffmpeg.probe(video_path, cmd=ffmpeg_bin)
+        format_info = probe.get("format", {})
+        return float(format_info.get("duration", 0.0))
+    except Exception:
+        return 0.0
+
+
+def embed_subtitles(video_path, srt_path, output_path, progress_callback=None):
     """
     Burn subtitles (.srt) into a video (.mp4) using FFmpeg.
     Optimized for Windows path escaping, GPU NVENC acceleration when available,
-    and multi-threaded ultrafast CPU encoding fallback.
+    multi-threaded ultrafast CPU encoding fallback, and real-time progress updates.
     """
     try:
         logger.info(f"Burning subtitles from {srt_path} into {video_path}")
         ffmpeg_bin = get_ffmpeg_bin()
 
-        # FFmpeg subtitle filter string on Windows requires forward slashes and escaped colons
-        # e.g., C:\Users\name\...\file.srt -> C\:/Users/name/.../file.srt
         clean_srt = os.path.abspath(srt_path).replace("\\", "/")
         escaped_srt = clean_srt.replace(":", "\\:")
+
+        total_duration = get_video_duration(video_path)
+
+        def run_ffmpeg_cmd(cmd_list):
+            process = subprocess.Popen(
+                cmd_list,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for line in process.stdout:
+                line = line.strip()
+                if progress_callback and total_duration > 0 and line.startswith("out_time_ms="):
+                    try:
+                        us = int(line.split("=")[1])
+                        secs = us / 1_000_000.0
+                        prog = min(99, int(85 + (secs / total_duration) * 14))
+                        progress_callback(prog)
+                    except ValueError:
+                        pass
+            process.wait()
+            return process.returncode == 0
+
+        sub_filter = (
+            f"subtitles='{escaped_srt}':force_style="
+            "'FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80050504,"
+            "BorderStyle=1,Outline=1.5,Shadow=0,MarginV=25,Alignment=2'"
+        )
 
         # Try GPU NVENC acceleration first if CUDA is available
         if torch.cuda.is_available():
             try:
-                (
-                    ffmpeg
-                    .input(video_path)
-                    .output(
-                        output_path,
-                        vf=f"subtitles='{escaped_srt}'",
-                        vcodec="h264_nvenc",
-                        acodec="copy",
-                        preset="p1",
-                        pix_fmt="yuv420p"
-                    )
-                    .run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
-                )
-                logger.info(f"Subtitles burned via GPU NVENC successfully. Output: {output_path}")
-                return True
+                gpu_cmd = [
+                    ffmpeg_bin, "-y",
+                    "-i", video_path,
+                    "-vf", sub_filter,
+                    "-vcodec", "h264_nvenc",
+                    "-acodec", "copy",
+                    "-preset", "p1",
+                    "-pix_fmt", "yuv420p",
+                    "-progress", "pipe:1",
+                    output_path,
+                ]
+                if run_ffmpeg_cmd(gpu_cmd) and os.path.exists(output_path):
+                    logger.info(f"Subtitles burned via GPU NVENC successfully. Output: {output_path}")
+                    return True
             except Exception as gpu_err:
                 logger.warning(f"GPU NVENC burn-in failed ({gpu_err}). Falling back to CPU ultrafast.")
 
-        # Multi-threaded CPU ultrafast encoding
-        (
-            ffmpeg
-            .input(video_path)
-            .output(
-                output_path,
-                vf=f"subtitles='{escaped_srt}'",
-                vcodec="libx264",
-                acodec="copy",
-                preset="ultrafast",
-                threads=0,
-                pix_fmt="yuv420p"
-            )
-            .run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
-        )
+        # Multi-threaded CPU ultrafast encoding fallback
+        cpu_cmd = [
+            ffmpeg_bin, "-y",
+            "-i", video_path,
+            "-vf", sub_filter,
+            "-vcodec", "libx264",
+            "-acodec", "copy",
+            "-preset", "ultrafast",
+            "-tune", "fastdecode",
+            "-threads", "0",
+            "-pix_fmt", "yuv420p",
+            "-progress", "pipe:1",
+            output_path,
+        ]
+        if run_ffmpeg_cmd(cpu_cmd) and os.path.exists(output_path):
+            logger.info(f"Subtitles burned successfully. Output: {output_path}")
+            return True
 
-        logger.info(f"Subtitles burned successfully. Output: {output_path}")
-        return True
-    except ffmpeg.Error as e:
-        stderr_msg = e.stderr.decode("utf-8", errors="ignore") if hasattr(e, "stderr") and e.stderr else str(e)
-        logger.error(f"FFmpeg burn-in error: {stderr_msg}")
+        logger.error("FFmpeg burn-in process exited with non-zero code.")
         return False
     except Exception as e:
         logger.error(f"Error burning subtitles: {e}")
         return False
+

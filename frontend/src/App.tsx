@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { Upload, FileVideo, CheckCircle2, Download, PlayCircle, Loader2, LogOut } from 'lucide-react';
+import { Upload, FileVideo, CheckCircle2, Download, PlayCircle, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { AnimatedDownload } from '@/components/ui/animated-download';
-import { AuthPage } from '@/components/auth/AuthPage';
 import { LanguageAccentDialog } from '@/components/LanguageAccentDialog';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000');
@@ -63,26 +62,7 @@ export default function App() {
   // Language confirmation state
   const [isConfirming, setIsConfirming] = useState(false);
 
-  // Auth State
-  const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
-  const [userEmail, setUserEmail] = useState<string | null>(localStorage.getItem('user_email'));
-
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const handleAuthSuccess = (newToken: string, email: string) => {
-    localStorage.setItem('token', newToken);
-    localStorage.setItem('user_email', email);
-    setToken(newToken);
-    setUserEmail(email);
-  };
-
-  const logout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user_email');
-    setToken(null);
-    setUserEmail(null);
-    reset();
-  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     setFile(e.target.files?.[0] || null);
@@ -100,41 +80,37 @@ export default function App() {
     let interval: any;
     const terminalStatuses = ['completed', 'failed', 'awaiting_user_confirmation'];
 
-    if (jobId && token && (!status || !terminalStatuses.includes(status.status))) {
+    if (jobId && (!status || !terminalStatuses.includes(status.status))) {
       interval = setInterval(async () => {
         try {
-          const response = await axios.get<JobStatus>(`${API_BASE_URL}/status/${jobId}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-          });
+          const response = await axios.get<JobStatus>(`${API_BASE_URL}/status/${jobId}`);
           setStatus(response.data);
 
           if (response.data.status === 'completed') {
             clearInterval(interval);
-            // Fetch SRT content for preview
+          }
+          if (response.data.status === 'completed' || response.data.status === 'embedding_captions' || response.data.progress >= 75) {
+            // Fetch SRT content for preview as soon as generated
             try {
-              const srtResponse = await axios.get<{ content: string }>(`${API_BASE_URL}/srt/${jobId}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-              });
+              const srtResponse = await axios.get<{ content: string }>(`${API_BASE_URL}/srt/${jobId}`);
               setSrtContent(srtResponse.data.content);
             } catch (e) {
-              console.error("SRT fetch error", e);
+              // SRT not ready yet
             }
-          } else if (response.data.status === 'failed' || response.data.status === 'awaiting_user_confirmation') {
+          }
+          if (response.data.status === 'failed' || response.data.status === 'awaiting_user_confirmation') {
             clearInterval(interval);
           }
         } catch (error) {
           console.error('Error fetching status:', error);
-          if ((error as any).response?.status === 401) {
-            logout();
-          }
         }
       }, 1500);
     }
     return () => clearInterval(interval);
-  }, [jobId, status, token]);
+  }, [jobId, status]);
 
   const handleUpload = async () => {
-    if (!file || !token) return;
+    if (!file) return;
 
     setIsUploading(true);
     setSrtContent('');
@@ -148,31 +124,25 @@ export default function App() {
         {
           headers: {
             'Content-Type': 'multipart/form-data',
-            'Authorization': `Bearer ${token}`
           },
         }
       );
       setJobId(response.data.job_id);
     } catch (error) {
       console.error('Upload error:', error);
-      if ((error as any).response?.status === 401) {
-        logout();
-      } else {
-        alert('Failed to upload video. Please try again.');
-      }
+      alert('Failed to upload video. Please try again.');
     } finally {
       setIsUploading(false);
     }
   };
 
   const handleLanguageConfirm = async (language: string, accentId: string) => {
-    if (!jobId || !token) return;
+    if (!jobId) return;
     setIsConfirming(true);
     try {
       await axios.post(
         `${API_BASE_URL}/confirm-language/${jobId}`,
-        { language, accent_id: accentId },
-        { headers: { 'Authorization': `Bearer ${token}` } }
+        { language, accent_id: accentId }
       );
       // Resume polling — clear awaiting_user_confirmation status
       setStatus((prev) => prev ? { ...prev, status: 'transcribing', progress: 25 } : prev);
@@ -185,10 +155,29 @@ export default function App() {
   };
 
   const handleDownloadSrt = async () => {
-    if (!jobId || !token) return;
+    if (!jobId) return;
+
+    // ── Standalone (pywebview) mode ──
+    const pyApi = (window as any).pywebview?.api;
+    if (pyApi?.save_srt) {
+      try {
+        const suggestedName = status?.filename
+          ? status.filename.replace(/\.[^/.]+$/, '') + '.srt'
+          : `captions_${jobId.slice(0, 8)}.srt`;
+        const result = await pyApi.save_srt(jobId, suggestedName);
+        if (result?.error && result.error !== 'cancelled') {
+          alert(`Could not save SRT file: ${result.error}`);
+        }
+      } catch (e) {
+        console.error("pywebview save_srt error", e);
+        alert("Failed to save SRT file via native dialog.");
+      }
+      return;
+    }
+
+    // ── Browser mode fallback (blob download) ──
     try {
       const response = await axios.get(`${API_BASE_URL}/download/${jobId}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
         responseType: 'blob'
       });
       const url = window.URL.createObjectURL(new Blob([response.data]));
@@ -206,10 +195,28 @@ export default function App() {
   };
 
   const handleDownloadVideo = async () => {
-    if (!jobId || !token) return;
+    if (!jobId) return;
+
+    // ── Standalone (pywebview) mode ──
+    const pyApi = (window as any).pywebview?.api;
+    if (pyApi?.save_video) {
+      try {
+        const baseName = status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video';
+        const suggestedName = `${baseName}_captioned.mp4`;
+        const result = await pyApi.save_video(jobId, suggestedName);
+        if (result?.error && result.error !== 'cancelled') {
+          alert(`Could not save video: ${result.error}`);
+        }
+      } catch (e) {
+        console.error("pywebview save_video error", e);
+        alert("Failed to save video via native dialog.");
+      }
+      return;
+    }
+
+    // ── Browser mode fallback (blob download) ──
     try {
       const response = await axios.get(`${API_BASE_URL}/download-video/${jobId}`, {
-        headers: { 'Authorization': `Bearer ${token}` },
         responseType: 'blob'
       });
       const url = window.URL.createObjectURL(new Blob([response.data]));
@@ -246,7 +253,14 @@ export default function App() {
         className="w-full max-w-4xl relative"
       >
         {/* Header Section */}
-        <div className="text-center mb-10">
+        <div className="text-center mb-10 flex flex-col items-center">
+          <motion.img
+            src="/logo.png"
+            alt="RegulaVitae Emblem Logo"
+            initial={{ scale: 0.8, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="w-20 h-20 md:w-24 md:h-24 mb-4 rounded-2xl shadow-2xl shadow-amber-500/20 border border-amber-500/30 object-cover"
+          />
           <motion.h1
             initial={{ scale: 0.9 }}
             animate={{ scale: 1 }}
@@ -262,12 +276,8 @@ export default function App() {
         {/* Main Content Area */}
         <AnimatePresence mode="wait">
 
-          {/* ── Auth ── */}
-          {!token ? (
-            <AuthPage key="auth" apiBaseUrl={API_BASE_URL} onAuthSuccess={handleAuthSuccess} />
-
-          /* ── Upload ── */
-          ) : !jobId ? (
+          {/* ── Upload ── */}
+          {!jobId ? (
             <motion.div
               key="upload"
               initial={{ scale: 0.95, opacity: 0 }}
@@ -330,13 +340,6 @@ export default function App() {
                     <>+ Generate Captions</>
                   )}
                 </Button>
-
-                <button
-                  onClick={logout}
-                  className="text-stone-600 hover:text-stone-400 text-xs font-bold uppercase tracking-widest transition-colors flex items-center gap-2"
-                >
-                  <LogOut size={12} /> Sign out of {userEmail}
-                </button>
               </div>
             </motion.div>
 
@@ -431,10 +434,6 @@ export default function App() {
                       <Button variant="ghost" onClick={reset} className="w-full text-stone-500 hover:text-white uppercase text-xs font-black tracking-widest">
                         Process Another Video
                       </Button>
-
-                      <button onClick={logout} className="w-full mt-4 text-stone-600 hover:text-stone-400 text-[10px] font-black uppercase tracking-[0.2em] flex items-center justify-center gap-2">
-                        <LogOut size={10} /> Logout
-                      </button>
                     </div>
                   </div>
 
@@ -464,9 +463,6 @@ export default function App() {
                   <Button onClick={reset} className="px-8 h-12 bg-white text-black font-black uppercase tracking-tighter rounded-full hover:bg-stone-200">
                     Try Again
                   </Button>
-                  <button onClick={logout} className="block mx-auto mt-4 text-stone-600 hover:text-stone-400 text-[10px] font-black uppercase tracking-[0.2em] flex items-center justify-center gap-2">
-                    <LogOut size={10} /> Sign out
-                  </button>
                 </div>
               )}
             </motion.div>
@@ -490,3 +486,4 @@ export default function App() {
     </div>
   );
 }
+

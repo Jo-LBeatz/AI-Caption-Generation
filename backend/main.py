@@ -1,11 +1,11 @@
 """
-main.py — Standalone version of the Captions by RegulaVitae API.
+main.py — Standalone version of the Captions by RegulaVitae API (No Sign-In Required).
 
-Key differences from the Docker version:
+Key features:
+  - No Sign-In / Auth required: upload and process videos directly
   - No Redis: job state lives in an in-memory dict (jobs.py → JOB_STORE)
-  - No Celery: transcription runs via FastAPI BackgroundTasks (background thread)
-  - No Redis auth store: user credentials are persisted in SQLite (database.py)
-  - Serves the React build as static files so no separate nginx is needed
+  - No Celery: transcription runs via FastAPI BackgroundTasks / daemon threads
+  - Serves the React build as static files
   - Native OS window handled by launcher.py via pywebview
 
 Two-stage transcription flow:
@@ -19,29 +19,31 @@ import os
 import sys
 import uuid
 import logging
-import csv
-import io
 import threading
-from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Header, Query, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
-from jose import JWTError, jwt
+from pydantic import BaseModel
 import shutil
-import dns.resolver
 
-import database
 from jobs import JOB_STORE
 from worker import (
     transcribe_video,
     transcribe_confirmed,
     get_upload_dir,
 )
+
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -50,13 +52,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# App init + DB init
+# App init
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Captions by RegulaVitae API", description="AI Caption Generation Engine")
-database.init_db()
 
 # ---------------------------------------------------------------------------
-# CORS  (still useful when running in dev mode without the static mount)
+# CORS
 # ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -67,135 +68,9 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Auth configuration
-# ---------------------------------------------------------------------------
-SECRET_KEY = os.getenv("JWT_SECRET", "SACRED_HEART_OF_JESUS_AUTHENTICATION_KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_DAYS = 30
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# ---------------------------------------------------------------------------
 # Upload directory
 # ---------------------------------------------------------------------------
 UPLOAD_DIR = get_upload_dir()
-
-
-# ---------------------------------------------------------------------------
-# Auth helpers
-# ---------------------------------------------------------------------------
-class UserAuth(BaseModel):
-    email: EmailStr
-    password: str
-
-
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
-def create_access_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-
-def validate_email_domain(email: str) -> bool:
-    """Confirm the email domain has MX records (can receive mail)."""
-    try:
-        domain = email.split("@")[1]
-        dns.resolver.resolve(domain, "MX")
-        return True
-    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.DNSException):
-        return False
-
-
-async def get_current_user(
-    authorization: Optional[str] = Header(None),
-    token: Optional[str] = Query(None),
-    auth_query: Optional[str] = Query(None, alias="authorization"),
-) -> str:
-    jwt_token = None
-    if authorization and authorization.startswith("Bearer "):
-        jwt_token = authorization.split(" ")[1]
-    elif token:
-        jwt_token = token.replace("Bearer ", "").strip()
-    elif auth_query:
-        jwt_token = auth_query.replace("Bearer ", "").strip()
-
-    if not jwt_token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    try:
-        payload = jwt.decode(jwt_token, SECRET_KEY, algorithms=[ALGORITHM])
-        email: str = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return email
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
-# ---------------------------------------------------------------------------
-# Admin endpoints
-# ---------------------------------------------------------------------------
-@app.get("/admin/users/export")
-async def export_users_csv(secret: Optional[str] = None):
-    admin_secret = os.getenv("ADMIN_SECRET", "1234")
-    if secret != admin_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    users = database.get_all_users()
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=["email", "joined_at"])
-    writer.writeheader()
-    for u in users:
-        writer.writerow(u)
-
-    response = Response(content=output.getvalue())
-    response.headers["Content-Disposition"] = "attachment; filename=regulavitae_users.csv"
-    response.headers["Content-Type"] = "text/csv"
-    return response
-
-
-# ---------------------------------------------------------------------------
-# Auth endpoints
-# ---------------------------------------------------------------------------
-@app.post("/auth/signup")
-async def signup(user: UserAuth):
-    email = user.email.lower()
-
-    if not validate_email_domain(email):
-        raise HTTPException(
-            status_code=400,
-            detail="This email address doesn't appear to be valid. Please use a real email.",
-        )
-
-    if database.get_user(email):
-        raise HTTPException(status_code=400, detail="Account already exists for this email.")
-
-    hashed_pwd = get_password_hash(user.password)
-    database.create_user(email, hashed_pwd)
-
-    token = create_access_token(data={"sub": email})
-    return {"token": token, "email": email}
-
-
-@app.post("/auth/login")
-async def login(user: UserAuth):
-    email = user.email.lower()
-    user_data = database.get_user(email)
-    if not user_data:
-        raise HTTPException(status_code=400, detail="Account not found. Please sign up.")
-
-    if not verify_password(user.password, user_data["password"]):
-        raise HTTPException(status_code=400, detail="Incorrect credentials.")
-
-    token = create_access_token(data={"sub": email})
-    return {"token": token, "email": email}
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +81,6 @@ async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     embed_captions: bool = False,
-    user_email: str = Depends(get_current_user),
 ):
     """
     Stage 1: Save video, extract audio, and auto-detect language.
@@ -228,7 +102,6 @@ async def upload_video(
         "status": "processing",
         "progress": 0,
         "filename": file.filename,
-        "user_email": user_email,
         "embed_captions": embed_captions,
     }
 
@@ -247,7 +120,6 @@ class LanguageConfirmation(BaseModel):
 async def confirm_language(
     job_id: str,
     body: LanguageConfirmation,
-    user_email: str = Depends(get_current_user),
 ):
     """
     Stage 2: User confirms (or overrides) the detected language and selects
@@ -256,8 +128,6 @@ async def confirm_language(
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_data.get("user_email") != user_email:
-        raise HTTPException(status_code=403, detail="Access denied")
     if job_data.get("status") != "awaiting_user_confirmation":
         raise HTTPException(
             status_code=400,
@@ -272,7 +142,7 @@ async def confirm_language(
         "confirmed_accent_id": body.accent_id,
     })
 
-    # Launch Stage 2 in a daemon thread (BackgroundTasks only available in endpoint scope)
+    # Launch Stage 2 in a daemon thread
     t = threading.Thread(
         target=transcribe_confirmed,
         args=(job_id, body.language, body.accent_id),
@@ -284,15 +154,11 @@ async def confirm_language(
 
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str, user_email: str = Depends(get_current_user)):
+async def get_status(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job_data.get("user_email") != user_email:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Return safe subset (exclude internal file paths)
     return {
         "status": job_data.get("status"),
         "progress": job_data.get("progress", 0),
@@ -309,12 +175,10 @@ async def get_status(job_id: str, user_email: str = Depends(get_current_user)):
 
 
 @app.get("/download/{job_id}")
-async def download_srt(job_id: str, user_email: str = Depends(get_current_user)):
+async def download_srt(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_data.get("user_email") != user_email:
-        raise HTTPException(status_code=403, detail="Access denied")
 
     srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
     if os.path.exists(srt_path):
@@ -322,13 +186,39 @@ async def download_srt(job_id: str, user_email: str = Depends(get_current_user))
     raise HTTPException(status_code=404, detail="SRT file generation in progress or failed.")
 
 
-@app.get("/download-video/{job_id}")
-async def download_burned_video(job_id: str, user_email: str = Depends(get_current_user)):
+@app.post("/download-srt-to-disk/{job_id}")
+async def download_srt_to_disk(
+    job_id: str,
+    dest_path: str = Query(..., description="Absolute path where the SRT file should be saved"),
+):
+    """
+    Standalone-only endpoint: write the SRT file directly to a user-chosen path on disk.
+    Called by the pywebview JS API after showing a native Save File dialog.
+    """
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_data.get("user_email") != user_email:
-        raise HTTPException(status_code=403, detail="Access denied")
+
+    srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
+    if not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail="SRT file not found.")
+
+    try:
+        dest_path = os.path.abspath(dest_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copy2(srt_path, dest_path)
+        logger.info(f"SRT saved to disk: {dest_path}")
+        return {"success": True, "saved_to": dest_path}
+    except Exception as e:
+        logger.error(f"Failed to write SRT to {dest_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+
+
+@app.get("/download-video/{job_id}")
+async def download_burned_video(job_id: str):
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found")
 
     video_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}_burned.mp4"))
     if os.path.exists(video_path):
@@ -337,13 +227,39 @@ async def download_burned_video(job_id: str, user_email: str = Depends(get_curre
     raise HTTPException(status_code=404, detail="Processed video not found.")
 
 
-@app.get("/srt/{job_id}")
-async def get_srt_content(job_id: str, user_email: str = Depends(get_current_user)):
+@app.post("/download-video-to-disk/{job_id}")
+async def download_video_to_disk(
+    job_id: str,
+    dest_path: str = Query(..., description="Absolute path where the video should be saved"),
+):
+    """
+    Standalone-only endpoint: write the captioned video directly to a user-chosen path on disk.
+    Called by the pywebview JS API after showing a native Save File dialog.
+    """
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_data.get("user_email") != user_email:
-        raise HTTPException(status_code=403, detail="Access denied")
+
+    video_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}_burned.mp4"))
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Processed video not found.")
+
+    try:
+        dest_path = os.path.abspath(dest_path)
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.copy2(video_path, dest_path)
+        logger.info(f"Video saved to disk: {dest_path}")
+        return {"success": True, "saved_to": dest_path}
+    except Exception as e:
+        logger.error(f"Failed to write video to {dest_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+
+
+@app.get("/srt/{job_id}")
+async def get_srt_content(job_id: str):
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found")
 
     srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
     if os.path.exists(srt_path):
@@ -363,10 +279,8 @@ def _get_frontend_dist() -> Optional[str]:
     candidates = []
     if getattr(sys, "frozen", False):
         candidates.append(os.path.join(sys._MEIPASS, "frontend_dist"))
-    # Dev: dist lives at frontend/dist relative to repo root
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates.append(os.path.join(repo_root, "frontend", "dist"))
-    # Also check next to this file (for non-frozen builds that copied dist here)
     candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend_dist"))
     for path in candidates:
         if os.path.isdir(path) and os.path.exists(os.path.join(path, "index.html")):

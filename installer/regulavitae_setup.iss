@@ -31,7 +31,7 @@ AllowNoIcons=yes
 PrivilegesRequired=admin
 OutputDir=..\installer_output
 OutputBaseFilename=RegulaVitae_Captions_Setup_v{#AppVersion}
-SetupIconFile=
+SetupIconFile=..\icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 ; Windows 10 or later required

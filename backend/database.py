@@ -17,12 +17,17 @@ logger = logging.getLogger(__name__)
 def get_db_path() -> str:
     """Return the correct path for the SQLite database in both dev and frozen modes."""
     if getattr(sys, "frozen", False):
-        # Running as a PyInstaller bundle — store next to the .exe
-        base = os.path.dirname(sys.executable)
+        # Installed app — use %APPDATA% so we never write into the
+        # read-only Program Files directory.
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        app_dir = os.path.join(appdata, "RegulaVitae Captions")
+        os.makedirs(app_dir, exist_ok=True)
+        base = app_dir
     else:
         # Running in development — store next to this file
         base = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "regulavitae.db")
+
 
 
 def get_connection() -> sqlite3.Connection:

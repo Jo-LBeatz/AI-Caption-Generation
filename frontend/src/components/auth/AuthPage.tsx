@@ -44,7 +44,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({ onAuthSuccess, apiBaseUrl })
         {/* Glow Effect */}
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-64 h-64 bg-amber-500/10 blur-[120px] pointer-events-none rounded-full" />
 
-        <div className="text-center mb-8 relative">
+        <div className="text-center mb-8 relative flex flex-col items-center">
+          <img
+            src="/logo.png"
+            alt="RegulaVitae Emblem"
+            className="w-16 h-16 mb-3 rounded-2xl border border-amber-500/30 shadow-lg shadow-amber-500/20 object-cover"
+          />
           <h2 className="text-3xl font-black text-white tracking-tighter mb-2">
             {isLogin ? "Welcome Back" : "Create Account"}
           </h2>

@@ -33,6 +33,15 @@ from jobs import JOB_STORE
 from video_utils import embed_subtitles
 from moderation import analyze_content
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -62,6 +71,7 @@ def get_model():
                         device=device,
                         compute_type=compute_type,
                         cpu_threads=cpu_threads,
+                        num_workers=2,
                     )
                     _model_dict = {
                         "type": "faster",
@@ -124,13 +134,16 @@ ensure_ffmpeg_on_path()
 def get_upload_dir() -> str:
     """Return the correct uploads directory in both dev and frozen modes."""
     if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
-        uploads = os.path.join(base, "uploads")
+        # Installed app — use %LOCALAPPDATA% (user-writable, good for large files).
+        # Never write to Program Files which is read-only for non-admin processes.
+        localappdata = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        uploads = os.path.join(localappdata, "RegulaVitae Captions", "uploads")
     else:
         base = os.path.join(os.path.dirname(__file__), "..", "uploads")
         uploads = os.path.abspath(base)
     os.makedirs(uploads, exist_ok=True)
     return uploads
+
 
 
 # ---------------------------------------------------------------------------
@@ -154,44 +167,62 @@ def format_timestamp(seconds: float) -> str:
 def detect_language_from_audio(audio_path: str) -> dict:
     """
     Load audio and use Whisper to detect the language.
+    Samples the first 30 seconds for near-instant language detection.
     Returns a dict: {language, probability, top_candidates}
     """
     model_info = get_model()
     model_type = model_info["type"]
     model = model_info["instance"]
 
-    if model_type == "faster":
-        segments, info = model.transcribe(
-            audio_path,
-            beam_size=1,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
-        )
-        top_lang = info.language or "en"
-        top_prob = getattr(info, "language_probability", 0.99)
-        return {
-            "language": top_lang,
-            "probability": round(top_prob * 100, 1),
-            "top_candidates": [{"language": top_lang, "probability": round(top_prob * 100, 1)}],
-        }
-    else:
-        audio = whisper.load_audio(audio_path)
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio, n_mels=model.dims.n_mels).to(model.device)
+    sample_audio = f"{audio_path}_sample.wav"
+    target_audio = audio_path
+    ffmpeg_bin = get_ffmpeg_bin()
+    try:
+        ffmpeg.input(audio_path).output(sample_audio, t=30, acodec="copy").run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
+        if os.path.exists(sample_audio):
+            target_audio = sample_audio
+    except Exception as e:
+        logger.warning(f"Could not extract 30s sample for language detection ({e}), using full audio.")
 
-        _, probs = model.detect_language(mel)
+    try:
+        if model_type == "faster":
+            segments, info = model.transcribe(
+                target_audio,
+                beam_size=1,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=500),
+            )
+            top_lang = info.language or "en"
+            top_prob = getattr(info, "language_probability", 0.99)
+            return {
+                "language": top_lang,
+                "probability": round(top_prob * 100, 1),
+                "top_candidates": [{"language": top_lang, "probability": round(top_prob * 100, 1)}],
+            }
+        else:
+            audio = whisper.load_audio(target_audio)
+            audio = whisper.pad_or_trim(audio)
+            mel = whisper.log_mel_spectrogram(audio, n_mels=model.dims.n_mels).to(model.device)
 
-        top_lang = max(probs, key=probs.get)
-        top_prob = probs[top_lang]
+            _, probs = model.detect_language(mel)
 
-        sorted_langs = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_candidates = [{"language": lang, "probability": round(prob * 100, 1)} for lang, prob in sorted_langs]
+            top_lang = max(probs, key=probs.get)
+            top_prob = probs[top_lang]
 
-        return {
-            "language": top_lang,
-            "probability": round(top_prob * 100, 1),
-            "top_candidates": top_candidates,
-        }
+            sorted_langs = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:5]
+            top_candidates = [{"language": lang, "probability": round(prob * 100, 1)} for lang, prob in sorted_langs]
+
+            return {
+                "language": top_lang,
+                "probability": round(top_prob * 100, 1),
+                "top_candidates": top_candidates,
+            }
+    finally:
+        if os.path.exists(sample_audio):
+            try:
+                os.remove(sample_audio)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -266,11 +297,16 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
         audio_path = f"{video_path}.wav"
         ffmpeg_bin = get_ffmpeg_bin()
         try:
-            ffmpeg.input(video_path).output(
+            ffmpeg.input(video_path).audio.output(
                 audio_path, acodec="pcm_s16le", ac=1, ar="16k"
             ).run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
+        except ffmpeg.Error as e:
+            stderr_msg = e.stderr.decode("utf-8", errors="ignore") if hasattr(e, "stderr") and e.stderr else str(e)
+            logger.error(f"FFmpeg audio extraction error: {stderr_msg}")
+            JOB_STORE[job_id].update({"status": "failed", "error": f"FFmpeg error: {stderr_msg}"})
+            return
         except Exception as e:
-            logger.error(f"FFmpeg error: {e}")
+            logger.error(f"Audio extraction error: {e}")
             JOB_STORE[job_id].update({"status": "failed", "error": f"FFmpeg error: {str(e)}"})
             return
 
@@ -306,6 +342,101 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
 
 
 # ---------------------------------------------------------------------------
+# SRT Cue Formatting (2-Line Maximum per Cue)
+# ---------------------------------------------------------------------------
+def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 40):
+    """
+    Format raw transcript segments into clean, non-intrusive SRT blocks.
+    Strictly limits each cue to a maximum of `max_lines` (2) lines
+    and `max_chars_per_line` (40) characters per line so captions never
+    clutter the screen or span half the video.
+    """
+    word_items = []
+    
+    for seg in raw_segments:
+        words = getattr(seg, "words", None) if not isinstance(seg, dict) else seg.get("words", None)
+        seg_start = getattr(seg, "start", 0.0) if not isinstance(seg, dict) else seg.get("start", 0.0)
+        seg_end = getattr(seg, "end", 0.0) if not isinstance(seg, dict) else seg.get("end", 0.0)
+        seg_text = getattr(seg, "text", "") if not isinstance(seg, dict) else seg.get("text", "")
+        
+        if words and len(words) > 0:
+            for w in words:
+                w_start = getattr(w, "start", seg_start) if not isinstance(w, dict) else w.get("start", seg_start)
+                w_end = getattr(w, "end", seg_end) if not isinstance(w, dict) else w.get("end", seg_end)
+                w_word = getattr(w, "word", "") if not isinstance(w, dict) else w.get("word", "")
+                w_word = w_word.strip()
+                if w_word:
+                    word_items.append({"word": w_word, "start": w_start, "end": w_end})
+        else:
+            clean_text = seg_text.strip()
+            if not clean_text:
+                continue
+            words_in_text = clean_text.split()
+            if not words_in_text:
+                continue
+            total_chars = max(1, sum(len(w) for w in words_in_text))
+            seg_duration = max(0.1, seg_end - seg_start)
+            
+            curr_t = seg_start
+            for w_word in words_in_text:
+                w_dur = seg_duration * (len(w_word) / total_chars)
+                word_items.append({
+                    "word": w_word,
+                    "start": curr_t,
+                    "end": curr_t + w_dur
+                })
+                curr_t += w_dur
+
+    if not word_items:
+        return [], []
+
+    lines = []
+    current_line_words = []
+    current_line_len = 0
+
+    for item in word_items:
+        w_text = item["word"]
+        needed_len = len(w_text) if not current_line_words else len(w_text) + 1
+        
+        if current_line_words and (current_line_len + needed_len > max_chars_per_line):
+            line_start = current_line_words[0]["start"]
+            line_end = current_line_words[-1]["end"]
+            line_text = " ".join(w["word"] for w in current_line_words)
+            lines.append({"text": line_text, "start": line_start, "end": line_end})
+            
+            current_line_words = [item]
+            current_line_len = len(w_text)
+        else:
+            current_line_words.append(item)
+            current_line_len += needed_len
+
+    if current_line_words:
+        line_start = current_line_words[0]["start"]
+        line_end = current_line_words[-1]["end"]
+        line_text = " ".join(w["word"] for w in current_line_words)
+        lines.append({"text": line_text, "start": line_start, "end": line_end})
+
+    srt_blocks = []
+    full_text_list = []
+    cue_index = 1
+
+    i = 0
+    while i < len(lines):
+        cue_lines = lines[i:i+max_lines]
+        cue_start = format_timestamp(cue_lines[0]["start"])
+        cue_end = format_timestamp(cue_lines[-1]["end"])
+        cue_text = "\n".join(l["text"] for l in cue_lines)
+        
+        srt_blocks.append(f"{cue_index}\n{cue_start} --> {cue_end}\n{cue_text}\n")
+        full_text_list.append(" ".join(l["text"] for l in cue_lines))
+        
+        cue_index += 1
+        i += len(cue_lines)
+
+    return srt_blocks, full_text_list
+
+
+# ---------------------------------------------------------------------------
 # Stage 2: Transcribe with confirmed language + accent
 # ---------------------------------------------------------------------------
 def transcribe_confirmed(job_id: str, language: str, accent_id: str):
@@ -335,8 +466,7 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         model_type = model_info["type"]
         model = model_info["instance"]
 
-        srt_segments = []
-        full_text = []
+        raw_segments_list = []
         final_lang = language
 
         if model_type == "faster":
@@ -347,20 +477,15 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
                 language=lang_param,
                 initial_prompt=prompt if prompt else None,
                 beam_size=1,
+                word_timestamps=True,
                 vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=500),
             )
             final_lang = getattr(info, "language", language)
             total_duration = getattr(info, "duration", 0) or 1.0
 
-            for i, segment in enumerate(segments):
-                start = format_timestamp(segment.start)
-                end = format_timestamp(segment.end)
-                text = segment.text.strip()
-                if text:
-                    srt_segments.append(f"{i+1}\n{start} --> {end}\n{text}\n")
-                    full_text.append(text)
-
+            for segment in segments:
+                raw_segments_list.append(segment)
                 if total_duration > 0:
                     prog = min(69, int(30 + (segment.end / total_duration) * 40))
                     JOB_STORE[job_id]["progress"] = prog
@@ -374,7 +499,7 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
                 "best_of": 1,
                 "temperature": 0.0,
                 "condition_on_previous_text": False,
-                "word_timestamps": False,
+                "word_timestamps": True,
                 "fp16": is_cuda,
             }
 
@@ -387,14 +512,10 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
 
             result = model.transcribe(audio_path, **transcribe_kwargs)
             final_lang = result.get("language", language)
+            raw_segments_list = result.get("segments", [])
 
-            for i, segment in enumerate(result["segments"]):
-                start = format_timestamp(segment["start"])
-                end = format_timestamp(segment["end"])
-                text = segment["text"].strip()
-                if text:
-                    srt_segments.append(f"{i+1}\n{start} --> {end}\n{text}\n")
-                    full_text.append(text)
+        # --- Format SRT Cues (Enforce 2 Lines Max per Cue) ---
+        srt_segments, full_text = format_srt_cues(raw_segments_list, max_lines=2, max_chars_per_line=40)
 
         # --- Generate SRT ---
         JOB_STORE[job_id].update({"status": "generating_srt", "progress": 70})
@@ -427,9 +548,14 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
             burned_video_path = os.path.abspath(
                 os.path.join(upload_dir, f"{job_id}_burned.mp4")
             )
-            if embed_subtitles(video_path, srt_path, burned_video_path):
+
+            def _update_burn_progress(p: int):
+                if job_id in JOB_STORE:
+                    JOB_STORE[job_id]["progress"] = p
+
+            if embed_subtitles(video_path, srt_path, burned_video_path, progress_callback=_update_burn_progress):
                 burning_successful = True
-                logger.info(f"Job {job_id}: Burn-in successful → {burned_video_path}")
+                logger.info(f"Job {job_id}: Burn-in successful -> {burned_video_path}")
             else:
                 logger.error(f"Job {job_id}: Burn-in failed")
 

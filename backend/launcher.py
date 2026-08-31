@@ -18,22 +18,45 @@ import logging
 import traceback
 import urllib.request
 
-# ---------------------------------------------------------------------------
-# Logging configuration — writes to log file in executable directory
-# ---------------------------------------------------------------------------
-if getattr(sys, "frozen", False):
-    _log_dir = os.path.dirname(sys.executable)
-else:
-    _log_dir = os.path.dirname(os.path.abspath(__file__))
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-_log_path = os.path.join(_log_dir, "regulavitae_launcher.log")
+# ---------------------------------------------------------------------------
+# Logging configuration — writes to log file in a user-writable directory
+# ---------------------------------------------------------------------------
+def _get_app_data_dir() -> str:
+    """
+    Return a user-writable directory for app data.
+    On Windows installed builds this is %APPDATA%\RegulaVitae Captions\
+    so we never try to write into the read-only Program Files folder.
+    """
+    if getattr(sys, "frozen", False):
+        # Installed app — use %APPDATA% (always user-writable)
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        app_dir = os.path.join(appdata, "RegulaVitae Captions")
+    else:
+        # Development — keep files next to this script
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(app_dir, exist_ok=True)
+    return app_dir
 
+
+_app_data_dir = _get_app_data_dir()
+_log_path = os.path.join(_app_data_dir, "regulavitae_launcher.log")
+
+_stream_handler = logging.StreamHandler(sys.stdout)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler(_log_path, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
+        _stream_handler,
     ],
 )
 logger = logging.getLogger(__name__)
@@ -134,6 +157,87 @@ def _wait_for_server(timeout: float = 30.0) -> bool:
 # ---------------------------------------------------------------------------
 # Native Window Launcher
 # ---------------------------------------------------------------------------
+class WebViewApi:
+    """
+    Python API exposed to the JavaScript frontend via window.pywebview.api.
+    This enables native OS capabilities (file dialogs, etc.) that are blocked
+    in a sandboxed webview environment.
+    """
+
+    def save_srt(self, job_id: str, suggested_filename: str = "captions.srt") -> dict:
+        """
+        Show a native Save File dialog and write the SRT to the user-chosen path.
+        Called from JavaScript: await window.pywebview.api.save_srt(jobId, filename)
+        Returns {"success": True, "path": "..."} or {"success": False, "error": "..."}
+        """
+        return self._save_file_to_disk(
+            job_id, suggested_filename,
+            endpoint=f"{URL}/download-srt-to-disk/{job_id}",
+            file_types=("SubRip Captions (*.srt)", "All Files (*.*)"),
+            default_ext=".srt",
+        )
+
+    def save_video(self, job_id: str, suggested_filename: str = "video_captioned.mp4") -> dict:
+        """
+        Show a native Save File dialog and write the captioned video to the user-chosen path.
+        Called from JavaScript: await window.pywebview.api.save_video(jobId, filename)
+        """
+        return self._save_file_to_disk(
+            job_id, suggested_filename,
+            endpoint=f"{URL}/download-video-to-disk/{job_id}",
+            file_types=("MP4 Video (*.mp4)", "All Files (*.*)"),
+            default_ext=".mp4",
+        )
+
+    def _save_file_to_disk(self, job_id: str, suggested_filename: str,
+                           endpoint: str, file_types: tuple, default_ext: str) -> dict:
+        """Internal helper: show save dialog then POST to backend to write the file."""
+        try:
+            import webview
+            windows = webview.windows
+            if not windows:
+                return {"success": False, "error": "No webview window found."}
+
+            result = windows[0].create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=suggested_filename,
+                file_types=file_types,
+            )
+
+            if not result:
+                return {"success": False, "error": "cancelled"}
+
+            save_path = result[0] if isinstance(result, (list, tuple)) else result
+            if not save_path.lower().endswith(default_ext):
+                save_path += default_ext
+
+            import urllib.request
+            import urllib.parse
+            import urllib.error
+
+            encoded_path = urllib.parse.quote(save_path, safe="")
+            api_url = f"{endpoint}?dest_path={encoded_path}"
+            req = urllib.request.Request(
+                api_url,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                if resp.status == 200:
+                    return {"success": True, "path": save_path}
+                return {"success": False, "error": f"Server returned {resp.status}"}
+
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")
+            logger.error(f"_save_file_to_disk HTTP error: {e.code} {err}")
+            return {"success": False, "error": f"HTTP {e.code}: {err}"}
+        except Exception as exc:
+            logger.error(f"_save_file_to_disk error: {exc}")
+            return {"success": False, "error": str(exc)}
+
+
+_webview_api = WebViewApi()
+
+
 def _launch_window() -> bool:
     """Try launching pywebview native window; returns True if launched successfully."""
     try:
@@ -148,6 +252,7 @@ def _launch_window() -> bool:
             resizable=True,
             confirm_close=True,
             background_color="#050504",
+            js_api=_webview_api,
         )
         webview.start(debug=False)
         return True
