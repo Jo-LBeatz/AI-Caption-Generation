@@ -17,6 +17,26 @@ import ffmpeg
 import logging
 import numpy as np
 import torch
+import re
+
+def sanitize_caption_text(text: str) -> str:
+    """
+    Post-process transcribed text to ensure strict capitalization rules:
+      - 'God', 'God's', 'Gods' must start with capital 'G'
+      - 'satan', 'satan's', 'satanic' must start with lowercase 's'
+    """
+    if not text:
+        return ""
+    # Capitalize God / God's / Gods
+    text = re.sub(r"\bgod\b", "God", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bgod's\b", "God's", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bgods\b", "Gods", text, flags=re.IGNORECASE)
+
+    # Lowercase satan / satan's / satanic
+    text = re.sub(r"\bsatan\b", "satan", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bsatan's\b", "satan's", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bsatanic\b", "satanic", text, flags=re.IGNORECASE)
+    return text
 
 try:
     import whisper
@@ -188,9 +208,9 @@ def detect_language_from_audio(audio_path: str) -> dict:
         if model_type == "faster":
             segments, info = model.transcribe(
                 target_audio,
-                beam_size=1,
+                beam_size=5,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                vad_parameters=dict(min_silence_duration_ms=1000, speech_pad_ms=400),
             )
             top_lang = info.language or "en"
             top_prob = getattr(info, "language_probability", 0.99)
@@ -364,11 +384,11 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
                 w_start = getattr(w, "start", seg_start) if not isinstance(w, dict) else w.get("start", seg_start)
                 w_end = getattr(w, "end", seg_end) if not isinstance(w, dict) else w.get("end", seg_end)
                 w_word = getattr(w, "word", "") if not isinstance(w, dict) else w.get("word", "")
-                w_word = w_word.strip()
+                w_word = sanitize_caption_text(w_word.strip())
                 if w_word:
                     word_items.append({"word": w_word, "start": w_start, "end": w_end})
         else:
-            clean_text = seg_text.strip()
+            clean_text = sanitize_caption_text(seg_text.strip())
             if not clean_text:
                 continue
             words_in_text = clean_text.split()
@@ -381,7 +401,7 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
             for w_word in words_in_text:
                 w_dur = seg_duration * (len(w_word) / total_chars)
                 word_items.append({
-                    "word": w_word,
+                    "word": sanitize_caption_text(w_word),
                     "start": curr_t,
                     "end": curr_t + w_dur
                 })
@@ -476,10 +496,12 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
                 audio_path,
                 language=lang_param,
                 initial_prompt=prompt if prompt else None,
-                beam_size=1,
+                beam_size=5,
+                patience=1.0,
+                suppress_blank=True,
                 word_timestamps=True,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                vad_parameters=dict(min_silence_duration_ms=1000, speech_pad_ms=400),
             )
             final_lang = getattr(info, "language", language)
             total_duration = getattr(info, "duration", 0) or 1.0
@@ -495,8 +517,8 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
             transcribe_kwargs = {
                 "verbose": False,
                 "task": "transcribe",
-                "beam_size": 1,
-                "best_of": 1,
+                "beam_size": 5,
+                "best_of": 5,
                 "temperature": 0.0,
                 "condition_on_previous_text": False,
                 "word_timestamps": True,
