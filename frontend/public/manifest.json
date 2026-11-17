@@ -1,22 +1,16 @@
 {
-  "name": "Captions by Jo-L",
-  "short_name": "Jo-L Captions",
-  "description": "Professional AI-powered video captioning",
+  "name": "Verbum — AI Caption Software",
+  "short_name": "Verbum",
+  "description": "Professional AI-powered video captioning with Catholic elegance and precision",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#050504",
-  "theme_color": "#b75000",
+  "theme_color": "#d4af37",
   "orientation": "any",
   "icons": [
     {
-      "src": "/icons/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/icons/icon-512.png",
-      "sizes": "512x512",
+      "src": "/logo.png",
+      "sizes": "1024x1024",
       "type": "image/png",
       "purpose": "any maskable"
     }

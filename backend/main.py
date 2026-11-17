@@ -1,23 +1,21 @@
 """
-main.py — Standalone version of the Captions by RegulaVitae API (No Sign-In Required).
+main.py — Standalone API for Verbum (AI Caption Software with Catholic Ambiance).
 
 Key features:
-  - No Sign-In / Auth required: upload and process videos directly
-  - No Redis: job state lives in an in-memory dict (jobs.py → JOB_STORE)
-  - No Celery: transcription runs via FastAPI BackgroundTasks / daemon threads
-  - Serves the React build as static files
-  - Native OS window handled by launcher.py via pywebview
-
-Two-stage transcription flow:
-  POST /upload          → Stage 1: extract audio + detect language
-                          Job status → 'awaiting_user_confirmation'
-  POST /confirm-language/{job_id} → Stage 2: transcribe with selected language/accent
-                          Job status → 'transcribing' → 'completed'
+  - No Sign-In / Auth required: upload and process videos directly.
+  - No Redis: job state lives in an in-memory dict (jobs.py → JOB_STORE).
+  - No Celery: transcription runs via FastAPI BackgroundTasks / daemon threads.
+  - Serves the React build as static files.
+  - Native OS window handled by launcher.py via pywebview.
+  - Real-time estimated time countdown (ETA in seconds).
+  - Moral Law analysis based on Moses' 10 Commandments and Christ's 2 Commandments.
+  - Automatically produces .SRT along with burnt-in video.
 """
 
 import os
 import sys
 import uuid
+import socket
 import logging
 import threading
 from typing import Optional
@@ -33,6 +31,8 @@ from jobs import JOB_STORE
 from worker import (
     transcribe_video,
     transcribe_confirmed,
+    resume_after_warning,
+    cancel_job,
     get_upload_dir,
 )
 
@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # App init
 # ---------------------------------------------------------------------------
-app = FastAPI(title="Captions by RegulaVitae API", description="AI Caption Generation Engine")
+app = FastAPI(title="Verbum API", description="AI Caption Generation Engine with Catholic Ambiance")
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -73,9 +73,31 @@ app.add_middleware(
 UPLOAD_DIR = get_upload_dir()
 
 
+def _get_local_ip() -> str:
+    """Detect LAN IP so mobile phones on the same Wi-Fi can connect."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
 # ---------------------------------------------------------------------------
 # Core endpoints
 # ---------------------------------------------------------------------------
+@app.get("/server-info")
+async def get_server_info():
+    """Return local LAN IP and application metadata for phone connectivity."""
+    return {
+        "app_name": "Verbum",
+        "local_ip": _get_local_ip(),
+        "version": "2.0.0",
+    }
+
+
 @app.post("/upload")
 async def upload_video(
     background_tasks: BackgroundTasks,
@@ -83,9 +105,8 @@ async def upload_video(
     embed_captions: bool = False,
 ):
     """
-    Stage 1: Save video, extract audio, and auto-detect language.
+    Stage 1: Save video, probe duration, extract audio, and auto-detect language.
     Returns job_id. Job pauses at 'awaiting_user_confirmation'.
-    Then call POST /confirm-language/{job_id} to proceed.
     """
     job_id = str(uuid.uuid4())
     ext = file.filename.rsplit(".", 1)[-1]
@@ -101,6 +122,7 @@ async def upload_video(
     JOB_STORE[job_id] = {
         "status": "processing",
         "progress": 0,
+        "eta_seconds": 15,
         "filename": file.filename,
         "embed_captions": embed_captions,
     }
@@ -153,6 +175,36 @@ async def confirm_language(
     return {"status": "transcription_started", "language": body.language, "accent_id": body.accent_id}
 
 
+@app.post("/proceed-despite-warning/{job_id}")
+async def proceed_despite_warning(job_id: str):
+    """
+    User acknowledged the moral law warning and elected to proceed anyway.
+    Resumes video burning / completion.
+    """
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    success = resume_after_warning(job_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to resume job.")
+
+    return {"status": "resumed"}
+
+
+@app.post("/cancel-job/{job_id}")
+async def cancel_job_endpoint(job_id: str):
+    """
+    User chose to cancel and discard the video after moral warning.
+    """
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    cancel_job(job_id)
+    return {"status": "cancelled"}
+
+
 @app.get("/status/{job_id}")
 async def get_status(job_id: str):
     job_data = JOB_STORE.get(job_id)
@@ -162,8 +214,12 @@ async def get_status(job_id: str):
     return {
         "status": job_data.get("status"),
         "progress": job_data.get("progress", 0),
+        "eta_seconds": job_data.get("eta_seconds", 0),
+        "duration": job_data.get("duration", 0),
         "filename": job_data.get("filename"),
         "video_burned": job_data.get("video_burned", False),
+        "has_srt": job_data.get("has_srt", False),
+        "morality_alert": job_data.get("morality_alert"),
         "error": job_data.get("error"),
         "detected_language": job_data.get("detected_language"),
         "detected_probability": job_data.get("detected_probability"),
@@ -182,7 +238,8 @@ async def download_srt(job_id: str):
 
     srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
     if os.path.exists(srt_path):
-        return FileResponse(srt_path, filename=f"captions_{job_id[:8]}.srt", media_type="application/x-subrip")
+        base_name = os.path.splitext(job_data.get("filename", "captions"))[0]
+        return FileResponse(srt_path, filename=f"{base_name}.srt", media_type="application/x-subrip")
     raise HTTPException(status_code=404, detail="SRT file generation in progress or failed.")
 
 
@@ -193,7 +250,6 @@ async def download_srt_to_disk(
 ):
     """
     Standalone-only endpoint: write the SRT file directly to a user-chosen path on disk.
-    Called by the pywebview JS API after showing a native Save File dialog.
     """
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -233,8 +289,8 @@ async def download_video_to_disk(
     dest_path: str = Query(..., description="Absolute path where the video should be saved"),
 ):
     """
-    Standalone-only endpoint: write the captioned video directly to a user-chosen path on disk.
-    Called by the pywebview JS API after showing a native Save File dialog.
+    Standalone-only endpoint: writes the captioned video to disk AND ALSO
+    writes the matching .SRT file in the same directory alongside it.
     """
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -246,12 +302,23 @@ async def download_video_to_disk(
 
     try:
         dest_path = os.path.abspath(dest_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        dest_dir = os.path.dirname(dest_path)
+        os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(video_path, dest_path)
         logger.info(f"Video saved to disk: {dest_path}")
-        return {"success": True, "saved_to": dest_path}
+
+        # Also copy matching .SRT file alongside the video!
+        srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
+        srt_dest = None
+        if os.path.exists(srt_path):
+            base_name, _ = os.path.splitext(dest_path)
+            srt_dest = f"{base_name}.srt"
+            shutil.copy2(srt_path, srt_dest)
+            logger.info(f"Matching SRT saved to disk alongside video: {srt_dest}")
+
+        return {"success": True, "saved_to": dest_path, "srt_saved_to": srt_dest}
     except Exception as e:
-        logger.error(f"Failed to write video to {dest_path}: {e}")
+        logger.error(f"Failed to write video/SRT to {dest_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
 
@@ -272,10 +339,7 @@ async def get_srt_content(job_id: str):
 # Static file serving — React build (MUST be mounted LAST)
 # ---------------------------------------------------------------------------
 def _get_frontend_dist() -> Optional[str]:
-    """
-    Find the React dist/ folder in both dev and frozen (PyInstaller) modes.
-    Returns None if not found (dev mode without a build).
-    """
+    """Find the React dist/ folder in both dev and frozen modes."""
     candidates = []
     if getattr(sys, "frozen", False):
         candidates.append(os.path.join(sys._MEIPASS, "frontend_dist"))
@@ -293,7 +357,4 @@ if _frontend_dist:
     app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="static")
     logger.info(f"Serving frontend from: {_frontend_dist}")
 else:
-    logger.warning(
-        "Frontend dist not found. Run 'npm run build' in the frontend/ folder, "
-        "then copy the dist/ output to backend/frontend_dist/ or use the build script."
-    )
+    logger.warning("Frontend dist not found. Run 'npm run build' in the frontend folder.")

@@ -39,7 +39,7 @@ def _get_app_data_dir() -> str:
     if getattr(sys, "frozen", False):
         # Installed app — use %APPDATA% (always user-writable)
         appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
-        app_dir = os.path.join(appdata, "RegulaVitae Captions")
+        app_dir = os.path.join(appdata, "Verbum")
     else:
         # Development — keep files next to this script
         app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +48,7 @@ def _get_app_data_dir() -> str:
 
 
 _app_data_dir = _get_app_data_dir()
-_log_path = os.path.join(_app_data_dir, "regulavitae_launcher.log")
+_log_path = os.path.join(_app_data_dir, "verbum_launcher.log")
 
 _stream_handler = logging.StreamHandler(sys.stdout)
 logging.basicConfig(
@@ -62,7 +62,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"Launcher started. Log file: {_log_path}")
 
-APP_TITLE = "Captions by RegulaVitae"
+APP_TITLE = "Verbum — AI Caption Software"
 HOST = "127.0.0.1"
 
 
@@ -126,9 +126,9 @@ def _start_uvicorn():
         import uvicorn
         import uvicorn.logging
         from main import app  # noqa: E402
-        logger.info(f"Starting uvicorn server on {HOST}:{PORT}")
+        logger.info(f"Starting uvicorn server on 0.0.0.0:{PORT}")
         _SERVER_STARTED = True
-        uvicorn.run(app, host=HOST, port=PORT, log_config=None)
+        uvicorn.run(app, host="0.0.0.0", port=PORT, log_config=None)
     except Exception as exc:
         _SERVER_ERROR = str(exc)
         logger.error(f"Uvicorn server crashed: {exc}\n{traceback.format_exc()}")

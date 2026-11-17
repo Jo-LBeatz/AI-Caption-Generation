@@ -35,7 +35,9 @@ def get_video_duration(video_path: str) -> float:
         return 0.0
 
 
-def embed_subtitles(video_path, srt_path, output_path, progress_callback=None):
+import time
+
+def embed_subtitles(video_path, srt_path, output_path, progress_callback=None, eta_callback=None):
     """
     Burn subtitles (.srt) into a video (.mp4) using FFmpeg.
     Optimized for Windows path escaping, GPU NVENC acceleration when available,
@@ -49,6 +51,7 @@ def embed_subtitles(video_path, srt_path, output_path, progress_callback=None):
         escaped_srt = clean_srt.replace(":", "\\:")
 
         total_duration = get_video_duration(video_path)
+        burn_start_time = time.time()
 
         def run_ffmpeg_cmd(cmd_list):
             process = subprocess.Popen(
@@ -61,12 +64,20 @@ def embed_subtitles(video_path, srt_path, output_path, progress_callback=None):
             )
             for line in process.stdout:
                 line = line.strip()
-                if progress_callback and total_duration > 0 and line.startswith("out_time_ms="):
+                if total_duration > 0 and line.startswith("out_time_ms="):
                     try:
                         us = int(line.split("=")[1])
                         secs = us / 1_000_000.0
-                        prog = min(99, int(85 + (secs / total_duration) * 14))
-                        progress_callback(prog)
+                        if progress_callback:
+                            prog = min(99, int(80 + (secs / total_duration) * 19))
+                            progress_callback(prog)
+                        if eta_callback:
+                            elapsed = max(0.1, time.time() - burn_start_time)
+                            speed = secs / elapsed
+                            if speed > 0.05:
+                                rem_video = max(0.0, total_duration - secs)
+                                eta_secs = int(rem_video / speed)
+                                eta_callback(max(1, eta_secs))
                     except ValueError:
                         pass
             process.wait()

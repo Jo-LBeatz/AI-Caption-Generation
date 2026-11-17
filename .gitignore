@@ -32,6 +32,7 @@ backend/env/
 # Build and deployment
 frontend/dist/
 frontend/build/
+backend/frontend_dist/
 
 # App specifics
 uploads/

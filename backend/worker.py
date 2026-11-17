@@ -1,17 +1,21 @@
 """
-worker.py — Standalone version (no Celery, no Redis).
+worker.py — High-Performance Transcription & Theological Morality Engine for Verbum.
 
-High-Performance Transcription Engine:
-  - Uses `faster-whisper` (CTranslate2 C++ engine) for 15x–50x real-time speed.
-  - Model defaults to 'base' (145 MB, already cached) for instant startup.
-    Override with WHISPER_MODEL env var: 'small', 'medium', 'large-v3', 'turbo'.
-  - Integrates Silero VAD to skip non-speech/silence sections, dramatically
-    cutting runtime on long videos with silence or music.
-  - Real-time progress updates are streamed to the job store as segments complete.
-  - Falls back to `openai-whisper` if `faster-whisper` is unavailable.
+Features:
+  - Uses `faster-whisper` (CTranslate2 C++ engine) with 'large-v3-turbo' by default
+    for maximum multilingual precision and speed, with automatic graceful fallback to 'small' / 'base'.
+  - Anti-hallucination parameters (condition_on_previous_text=False, hallucination_silence_threshold,
+    no_speech_threshold, compression_ratio_threshold, Silero VAD) to eliminate ghost captions.
+  - Accurate, real-time estimated time to completion (ETA in seconds) based on actual video duration
+    and live measured speech processing rates.
+  - Full theological morality check based on the Ten Commandments of Moses (bpr1_catholic_prayer_book.pdf pp. 98-100)
+    and the Two Commandments of Christ (The Two Commandments of Christ.pdf).
+  - Both .SRT subtitles and burned-in .MP4 video produced simultaneously when burning is selected.
 """
+
 import os
 import sys
+import time
 import threading
 import ffmpeg
 import logging
@@ -27,10 +31,11 @@ def sanitize_caption_text(text: str) -> str:
     """
     if not text:
         return ""
-    # Capitalize God / God's / Gods
+    # Capitalize God / God's / Gods / Lord
     text = re.sub(r"\bgod\b", "God", text, flags=re.IGNORECASE)
     text = re.sub(r"\bgod's\b", "God's", text, flags=re.IGNORECASE)
     text = re.sub(r"\bgods\b", "Gods", text, flags=re.IGNORECASE)
+    text = re.sub(r"\blord\b", "Lord", text, flags=re.IGNORECASE)
 
     # Lowercase satan / satan's / satanic
     text = re.sub(r"\bsatan\b", "satan", text, flags=re.IGNORECASE)
@@ -50,8 +55,8 @@ except ImportError:
     HAS_FASTER_WHISPER = False
 
 from jobs import JOB_STORE
-from video_utils import embed_subtitles
-from moderation import analyze_content
+from video_utils import embed_subtitles, get_video_duration
+from morality import evaluate_video_morality
 
 if sys.platform == "win32":
     try:
@@ -68,7 +73,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model management
 # ---------------------------------------------------------------------------
-MODEL_NAME = os.getenv("WHISPER_MODEL", "base")
+MODEL_NAME = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 _model_dict = None
 _model_lock = threading.Lock()
 
@@ -81,26 +86,37 @@ def get_model():
             if HAS_FASTER_WHISPER:
                 compute_type = "float16" if device == "cuda" else "int8"
                 cpu_threads = os.cpu_count() or 4
-                logger.info(
-                    f"Loading faster-whisper CTranslate2 model '{MODEL_NAME}' "
-                    f"on device '{device}' (compute_type={compute_type}, threads={cpu_threads})"
-                )
-                try:
-                    instance = FasterWhisperModel(
-                        MODEL_NAME,
-                        device=device,
-                        compute_type=compute_type,
-                        cpu_threads=cpu_threads,
-                        num_workers=2,
-                    )
-                    _model_dict = {
-                        "type": "faster",
-                        "instance": instance,
-                        "device": device,
-                    }
-                except Exception as e:
-                    logger.warning(f"faster-whisper init failed ({e}). Falling back to openai-whisper.")
-                    _model_dict = None
+                
+                # Priority list of models to try
+                candidate_models = [MODEL_NAME]
+                if MODEL_NAME != "small":
+                    candidate_models.append("small")
+                if MODEL_NAME != "base":
+                    candidate_models.append("base")
+
+                for candidate in candidate_models:
+                    try:
+                        logger.info(
+                            f"Loading faster-whisper CTranslate2 model '{candidate}' "
+                            f"on device '{device}' (compute_type={compute_type}, threads={cpu_threads})"
+                        )
+                        instance = FasterWhisperModel(
+                            candidate,
+                            device=device,
+                            compute_type=compute_type,
+                            cpu_threads=cpu_threads,
+                            num_workers=2,
+                        )
+                        _model_dict = {
+                            "type": "faster",
+                            "instance": instance,
+                            "device": device,
+                            "model_name": candidate,
+                        }
+                        logger.info(f"Successfully initialized faster-whisper with '{candidate}'")
+                        break
+                    except Exception as e:
+                        logger.warning(f"Could not load faster-whisper model '{candidate}': {e}")
 
             if _model_dict is None:
                 if whisper is None:
@@ -113,6 +129,7 @@ def get_model():
                     "type": "openai",
                     "instance": instance,
                     "device": device,
+                    "model_name": MODEL_NAME,
                 }
     return _model_dict
 
@@ -121,11 +138,7 @@ def get_model():
 # Path helpers
 # ---------------------------------------------------------------------------
 def get_ffmpeg_bin() -> str:
-    """
-    Return the path to the bundled ffmpeg executable.
-    In a PyInstaller bundle, binaries land in sys._MEIPASS/bin/.
-    In development, look for backend/bin/ffmpeg.exe (or rely on system PATH).
-    """
+    """Return the path to the bundled ffmpeg executable."""
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", "")
         bundled = os.path.join(meipass, "bin", "ffmpeg.exe")
@@ -136,46 +149,32 @@ def get_ffmpeg_bin() -> str:
 
 
 def ensure_ffmpeg_on_path() -> str:
-    """Ensure the directory containing ffmpeg.exe is added to system PATH for Whisper internals."""
     bin_path = get_ffmpeg_bin()
-    if bin_path != "ffmpeg" and os.path.exists(bin_path):
+    if os.path.exists(bin_path):
         bin_dir = os.path.dirname(os.path.abspath(bin_path))
-        path_env = os.environ.get("PATH", "")
-        if bin_dir.lower() not in [p.lower() for p in path_env.split(os.pathsep)]:
-            os.environ["PATH"] = bin_dir + os.pathsep + path_env
-            logger.info(f"Added FFmpeg directory to PATH: {bin_dir}")
+        if bin_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"Injected {bin_dir} into PATH")
     return bin_path
 
 
-# Ensure PATH is configured at module import time
-ensure_ffmpeg_on_path()
-
-
 def get_upload_dir() -> str:
-    """Return the correct uploads directory in both dev and frozen modes."""
-    if getattr(sys, "frozen", False):
-        # Installed app — use %LOCALAPPDATA% (user-writable, good for large files).
-        # Never write to Program Files which is read-only for non-admin processes.
-        localappdata = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        uploads = os.path.join(localappdata, "RegulaVitae Captions", "uploads")
-    else:
-        base = os.path.join(os.path.dirname(__file__), "..", "uploads")
-        uploads = os.path.abspath(base)
-    os.makedirs(uploads, exist_ok=True)
-    return uploads
-
+    upload_dir = os.getenv("UPLOAD_DIR")
+    if not upload_dir:
+        upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+    os.makedirs(upload_dir, exist_ok=True)
+    return upload_dir
 
 
 # ---------------------------------------------------------------------------
 # Timestamp formatting
 # ---------------------------------------------------------------------------
 def format_timestamp(seconds: float) -> str:
-    td = float(seconds)
-    hours = int(td // 3600)
-    minutes = int((td % 3600) // 60)
-    secs = int(td % 60)
-    milliseconds = int(round((td - (hours * 3600 + minutes * 60 + secs)) * 1000))
-    if milliseconds == 1000:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    milliseconds = int(round((seconds - int(seconds)) * 1000))
+    if milliseconds >= 1000:
         secs += 1
         milliseconds = 0
     return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
@@ -185,11 +184,7 @@ def format_timestamp(seconds: float) -> str:
 # Language detection
 # ---------------------------------------------------------------------------
 def detect_language_from_audio(audio_path: str) -> dict:
-    """
-    Load audio and use Whisper to detect the language.
-    Samples the first 30 seconds for near-instant language detection.
-    Returns a dict: {language, probability, top_candidates}
-    """
+    """Load audio and use Whisper to detect language from first 30 seconds."""
     model_info = get_model()
     model_type = model_info["type"]
     model = model_info["instance"]
@@ -210,7 +205,7 @@ def detect_language_from_audio(audio_path: str) -> dict:
                 target_audio,
                 beam_size=5,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=1000, speech_pad_ms=400),
+                vad_parameters=dict(min_silence_duration_ms=600, speech_pad_ms=300),
             )
             top_lang = info.language or "en"
             top_prob = getattr(info, "language_probability", 0.99)
@@ -282,7 +277,7 @@ ACCENT_PROMPTS = {
     # Chinese
     "zh_mandarin_simplified":    "普通话，简体中文。",
     "zh_mandarin_traditional":   "普通話，繁體中文。",
-    "zh_cantonese":              "<ctrl42>這是廣東話。",
+    "zh_cantonese":              "這是廣東話。",
     # German
     "de_standard":    "Dies ist Hochdeutsch, Standarddeutsch.",
     "de_austrian":    "Dies ist österreichisches Deutsch.",
@@ -305,14 +300,21 @@ def build_initial_prompt(language: str, accent_id: str) -> str:
 # ---------------------------------------------------------------------------
 def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
     """
-    Stage 1: Extract audio from video, run language detection,
+    Stage 1: Extract audio from video, measure total duration, run language detection,
     then pause with status='awaiting_user_confirmation'.
-    The confirmed language/accent will be applied in stage 2.
     """
     try:
-        # --- Extract Audio ---
-        JOB_STORE[job_id].update({"status": "extracting_audio", "progress": 5})
-        logger.info(f"Job {job_id}: Extracting audio from {video_path}")
+        # Measure duration
+        total_duration = get_video_duration(video_path)
+        JOB_STORE[job_id]["duration"] = total_duration
+
+        # Initial ETA for extraction
+        JOB_STORE[job_id].update({
+            "status": "extracting_audio",
+            "progress": 5,
+            "eta_seconds": max(3, int(total_duration * 0.05)),
+        })
+        logger.info(f"Job {job_id}: Extracting audio from {video_path} (Duration: {total_duration:.1f}s)")
 
         audio_path = f"{video_path}.wav"
         ffmpeg_bin = get_ffmpeg_bin()
@@ -331,7 +333,7 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
             return
 
         # --- Detect Language ---
-        JOB_STORE[job_id].update({"status": "detecting_language", "progress": 15})
+        JOB_STORE[job_id].update({"status": "detecting_language", "progress": 15, "eta_seconds": 3})
         logger.info(f"Job {job_id}: Detecting language")
 
         try:
@@ -340,12 +342,14 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
             logger.warning(f"Job {job_id}: Language detection failed: {e}. Defaulting to auto.")
             lang_result = {"language": "auto", "probability": 0.0, "top_candidates": []}
 
-        # Store audio_path and embed_captions in job store for stage 2
+        # Store parameters in job store for stage 2
         JOB_STORE[job_id].update({
             "status": "awaiting_user_confirmation",
             "progress": 20,
+            "eta_seconds": 0,
             "audio_path": audio_path,
             "video_path": video_path,
+            "duration": total_duration,
             "embed_captions": embed_captions,
             "detected_language": lang_result["language"],
             "detected_probability": lang_result["probability"],
@@ -362,22 +366,32 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
 
 
 # ---------------------------------------------------------------------------
-# SRT Cue Formatting (2-Line Maximum per Cue)
+# SRT Cue Formatting (Anti-Hallucination & Clean Wrapping)
 # ---------------------------------------------------------------------------
+HALLUCINATION_BLACKLIST = [
+    "subtitles by", "amara.org", "thank you for watching", "thanks for watching",
+    "please subscribe", "subscribe to my channel", "like and subscribe",
+    "all rights reserved", "[applause]", "[music]", "[laughter]"
+]
+
 def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 40):
     """
-    Format raw transcript segments into clean, non-intrusive SRT blocks.
-    Strictly limits each cue to a maximum of `max_lines` (2) lines
-    and `max_chars_per_line` (40) characters per line so captions never
-    clutter the screen or span half the video.
+    Format raw transcript segments into clean, accurate SRT blocks.
+    Removes hallucination loops and YouTube noise artifacts.
     """
     word_items = []
     
     for seg in raw_segments:
+        seg_text = getattr(seg, "text", "") if not isinstance(seg, dict) else seg.get("text", "")
+        clean_text_check = seg_text.strip().lower()
+        
+        # Suppress common hallucinated filler
+        if any(h in clean_text_check for h in HALLUCINATION_BLACKLIST):
+            continue
+
         words = getattr(seg, "words", None) if not isinstance(seg, dict) else seg.get("words", None)
         seg_start = getattr(seg, "start", 0.0) if not isinstance(seg, dict) else seg.get("start", 0.0)
         seg_end = getattr(seg, "end", 0.0) if not isinstance(seg, dict) else seg.get("end", 0.0)
-        seg_text = getattr(seg, "text", "") if not isinstance(seg, dict) else seg.get("text", "")
         
         if words and len(words) > 0:
             for w in words:
@@ -439,6 +453,8 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
     srt_blocks = []
     full_text_list = []
     cue_index = 1
+    last_cue_text = ""
+    repeat_count = 0
 
     i = 0
     while i < len(lines):
@@ -447,6 +463,16 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
         cue_end = format_timestamp(cue_lines[-1]["end"])
         cue_text = "\n".join(l["text"] for l in cue_lines)
         
+        # Deduplicate consecutive hallucination loops
+        if cue_text.lower() == last_cue_text.lower():
+            repeat_count += 1
+            if repeat_count > 1:
+                i += len(cue_lines)
+                continue
+        else:
+            repeat_count = 0
+            last_cue_text = cue_text
+
         srt_blocks.append(f"{cue_index}\n{cue_start} --> {cue_end}\n{cue_text}\n")
         full_text_list.append(" ".join(l["text"] for l in cue_lines))
         
@@ -461,27 +487,37 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
 # ---------------------------------------------------------------------------
 def transcribe_confirmed(job_id: str, language: str, accent_id: str):
     """
-    Stage 2: Perform full transcription using the user-confirmed language
-    and accent hint. Called from the /confirm-language endpoint.
+    Stage 2: Transcribes the audio with anti-hallucination settings,
+    computes real-time countdown ETA, runs moral law check,
+    and produces both .SRT and burned-in .MP4.
     """
-    job = JOB_STORE.get(job_id)
-    if not job:
-        logger.error(f"Job {job_id} not found for transcription.")
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        logger.error(f"transcribe_confirmed: job {job_id} not found in store")
         return
 
-    audio_path = job.get("audio_path")
-    video_path = job.get("video_path")
-    embed_captions = job.get("embed_captions", False)
+    audio_path = job_data.get("audio_path")
+    video_path = job_data.get("video_path")
+    embed_captions = job_data.get("embed_captions", False)
+    total_duration = job_data.get("duration", 0.0)
 
-    if not audio_path or not video_path:
-        JOB_STORE[job_id].update({"status": "failed", "error": "Audio/video paths missing from job store."})
-        return
+    if not total_duration or total_duration <= 0:
+        total_duration = get_video_duration(video_path) if video_path else 1.0
+        JOB_STORE[job_id]["duration"] = total_duration
+
+    stage2_start = time.time()
+    # Initial ETA calculation
+    est_transcribe_secs = max(5, int(total_duration / 2.0))
+    est_burn_secs = int(total_duration * 0.25) if embed_captions else 0
+    initial_eta = est_transcribe_secs + est_burn_secs
+
+    JOB_STORE[job_id].update({
+        "status": "transcribing",
+        "progress": 25,
+        "eta_seconds": max(5, initial_eta),
+    })
 
     try:
-        # --- Transcribe with Whisper ---
-        JOB_STORE[job_id].update({"status": "transcribing", "progress": 30})
-        logger.info(f"Job {job_id}: Transcribing (language={language}, accent={accent_id})")
-
         model_info = get_model()
         model_type = model_info["type"]
         model = model_info["instance"]
@@ -492,25 +528,45 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         if model_type == "faster":
             lang_param = language if language and language != "auto" else None
             prompt = build_initial_prompt(language, accent_id)
+
+            # High-accuracy, anti-hallucination transcription configuration
             segments, info = model.transcribe(
                 audio_path,
                 language=lang_param,
                 initial_prompt=prompt if prompt else None,
                 beam_size=5,
                 patience=1.0,
+                temperature=0.0,
+                condition_on_previous_text=False,          # STOPS repetitive hallucination loops!
+                hallucination_silence_threshold=2.0,       # STOPS hallucinating over silence!
+                no_speech_threshold=0.6,                   # Discards non-speech audio segments!
+                compression_ratio_threshold=2.4,           # Rejects degenerate repetitive loops!
                 suppress_blank=True,
                 word_timestamps=True,
                 vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=1000, speech_pad_ms=400),
+                vad_parameters=dict(
+                    threshold=0.5,
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=250,
+                ),
             )
             final_lang = getattr(info, "language", language)
-            total_duration = getattr(info, "duration", 0) or 1.0
+            audio_dur = getattr(info, "duration", total_duration) or total_duration
 
             for segment in segments:
                 raw_segments_list.append(segment)
-                if total_duration > 0:
-                    prog = min(69, int(30 + (segment.end / total_duration) * 40))
-                    JOB_STORE[job_id]["progress"] = prog
+                elapsed = max(0.2, time.time() - stage2_start)
+                if segment.end > 0.5:
+                    speed = segment.end / elapsed
+                    rem_audio = max(0.0, audio_dur - segment.end)
+                    eta_transcribe = rem_audio / max(speed, 0.2)
+                    burn_est = (audio_dur * 0.22) if embed_captions else 0
+                    total_eta = max(1, int(eta_transcribe + burn_est + 1))
+                    prog = min(72, int(25 + (segment.end / max(audio_dur, 1.0)) * 47))
+                    JOB_STORE[job_id].update({
+                        "progress": prog,
+                        "eta_seconds": total_eta,
+                    })
 
         else:
             is_cuda = torch.cuda.is_available()
@@ -524,7 +580,6 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
                 "word_timestamps": True,
                 "fp16": is_cuda,
             }
-
             if language and language != "auto":
                 transcribe_kwargs["language"] = language
 
@@ -539,71 +594,134 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         # --- Format SRT Cues (Enforce 2 Lines Max per Cue) ---
         srt_segments, full_text = format_srt_cues(raw_segments_list, max_lines=2, max_chars_per_line=40)
 
-        # --- Generate SRT ---
-        JOB_STORE[job_id].update({"status": "generating_srt", "progress": 70})
+        # --- Save SRT File ---
+        JOB_STORE[job_id].update({"status": "generating_srt", "progress": 73, "eta_seconds": 3})
         srt_content = "\n".join(srt_segments)
         upload_dir = get_upload_dir()
         srt_path = os.path.abspath(os.path.join(upload_dir, f"{job_id}.srt"))
-
-        # --- Moderation pass ---
-        JOB_STORE[job_id].update({"status": "checking_content", "progress": 75})
-        is_allowed, message = analyze_content(" ".join(full_text))
-        if not is_allowed:
-            logger.warning(f"Job {job_id}: Content rejected. Reason: {message}")
-            for p in [audio_path, video_path]:
-                if os.path.exists(p):
-                    os.remove(p)
-            JOB_STORE[job_id].update({"status": "failed", "error": f"Content policy: {message}"})
-            return
-
-        # --- Save SRT ---
         with open(srt_path, "w", encoding="utf-8") as f:
             f.write(srt_content)
+        JOB_STORE[job_id]["has_srt"] = True
+        JOB_STORE[job_id]["final_language"] = final_lang
 
-        # --- Burn subtitles (optional) ---
-        burning_successful = False
-        burned_video_path = None
+        # --- Moral Law Check (Moses' 10 Commandments & Christ's 2 Commandments) ---
+        JOB_STORE[job_id].update({"status": "checking_morality", "progress": 74, "eta_seconds": 2})
+        full_transcript = " ".join(full_text)
+        morality_result = evaluate_video_morality(full_transcript)
 
-        if embed_captions:
-            JOB_STORE[job_id].update({"status": "embedding_captions", "progress": 85})
-            logger.info(f"Job {job_id}: Starting subtitle burn-in")
-            burned_video_path = os.path.abspath(
-                os.path.join(upload_dir, f"{job_id}_burned.mp4")
-            )
+        if morality_result.get("is_evil"):
+            logger.warning(f"Job {job_id}: Morality evaluation flagged evil message: {morality_result}")
+            # Sound alert on host machine
+            if sys.platform == "win32":
+                try:
+                    import winsound
+                    winsound.Beep(1200, 350)
+                    winsound.Beep(900, 350)
+                    winsound.Beep(1300, 450)
+                except Exception:
+                    pass
 
-            def _update_burn_progress(p: int):
-                if job_id in JOB_STORE:
-                    JOB_STORE[job_id]["progress"] = p
+            JOB_STORE[job_id].update({
+                "status": "morality_warning",
+                "morality_alert": morality_result,
+                "progress": 75,
+                "eta_seconds": 0,
+            })
+            # Pause pipeline here and await user decision (Proceed or Cancel)
+            return
 
-            if embed_subtitles(video_path, srt_path, burned_video_path, progress_callback=_update_burn_progress):
-                burning_successful = True
-                logger.info(f"Job {job_id}: Burn-in successful -> {burned_video_path}")
-            else:
-                logger.error(f"Job {job_id}: Burn-in failed")
-
-        JOB_STORE[job_id].update({
-            "status": "completed",
-            "progress": 100,
-            "video_burned": burning_successful,
-            "burned_video_filename": os.path.basename(burned_video_path) if burning_successful else None,
-            "final_language": final_lang,
-        })
-        logger.info(f"Job {job_id}: Completed. SRT saved at {srt_path}")
-
-        # Cleanup temporary audio
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-        if not embed_captions or burning_successful:
-            if os.path.exists(video_path):
-                os.remove(video_path)
+        # Content is clean -> proceed immediately to completion / burning
+        finalize_transcription(job_id)
 
     except Exception as e:
         logger.error(f"Stage-2 error on job {job_id}: {e}")
         JOB_STORE[job_id].update({"status": "failed", "error": str(e)})
-        # Cleanup on error
-        for p in [audio_path]:
-            if p and os.path.exists(p):
+
+
+def finalize_transcription(job_id: str):
+    """Completes subtitle burning (if requested) and marks job as completed."""
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        return
+
+    video_path = job_data.get("video_path")
+    audio_path = job_data.get("audio_path")
+    embed_captions = job_data.get("embed_captions", False)
+    upload_dir = get_upload_dir()
+    srt_path = os.path.abspath(os.path.join(upload_dir, f"{job_id}.srt"))
+
+    burning_successful = False
+    burned_video_path = None
+
+    if embed_captions and video_path and os.path.exists(video_path):
+        JOB_STORE[job_id].update({"status": "embedding_captions", "progress": 78})
+        burned_video_path = os.path.abspath(os.path.join(upload_dir, f"{job_id}_burned.mp4"))
+
+        def _update_burn_prog(p: int):
+            if job_id in JOB_STORE:
+                JOB_STORE[job_id]["progress"] = p
+
+        def _update_burn_eta(rem_sec: int):
+            if job_id in JOB_STORE:
+                JOB_STORE[job_id]["eta_seconds"] = max(1, rem_sec)
+
+        if embed_subtitles(video_path, srt_path, burned_video_path,
+                           progress_callback=_update_burn_prog,
+                           eta_callback=_update_burn_eta):
+            burning_successful = True
+            logger.info(f"Job {job_id}: Burn-in successful -> {burned_video_path}")
+        else:
+            logger.error(f"Job {job_id}: Burn-in failed")
+
+    JOB_STORE[job_id].update({
+        "status": "completed",
+        "progress": 100,
+        "eta_seconds": 0,
+        "has_srt": os.path.exists(srt_path),
+        "video_burned": burning_successful,
+        "burned_video_filename": os.path.basename(burned_video_path) if burning_successful else None,
+        "srt_filename": f"{job_id}.srt",
+    })
+    logger.info(f"Job {job_id}: Fully completed. SRT and video ready.")
+
+    # Cleanup temp audio
+    if audio_path and os.path.exists(audio_path):
+        try:
+            os.remove(audio_path)
+        except Exception:
+            pass
+
+
+def resume_after_warning(job_id: str) -> bool:
+    """Triggered when user explicitly opts to proceed despite moral law warning."""
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        return False
+    t = threading.Thread(target=finalize_transcription, args=(job_id,), daemon=True)
+    t.start()
+    return True
+
+
+def cancel_job(job_id: str) -> bool:
+    """Triggered when user cancels and discards video upon warning."""
+    job_data = JOB_STORE.get(job_id)
+    if not job_data:
+        return False
+    upload_dir = get_upload_dir()
+    for fname in [f"{job_id}.mp4", f"{job_id}.srt", f"{job_id}_burned.mp4", f"{job_id}.wav"]:
+        p = os.path.join(upload_dir, fname)
+        if os.path.exists(p):
+            try:
                 os.remove(p)
+            except Exception:
+                pass
+    JOB_STORE[job_id].update({
+        "status": "failed",
+        "error": "Process halted by user after moral law warning.",
+        "progress": 0,
+        "eta_seconds": 0,
+    })
+    return True
 
 
 # ---------------------------------------------------------------------------

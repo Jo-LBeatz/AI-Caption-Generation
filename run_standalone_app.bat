@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-title Captions by RegulaVitae — Standalone App Launcher
+title Verbum — Standalone App Launcher
 
 echo.
 echo ============================================================
-echo   Captions by RegulaVitae — Launching Application...
+echo   Verbum — Launching Application...
 echo ============================================================
 echo.
 
