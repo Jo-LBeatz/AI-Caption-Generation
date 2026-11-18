@@ -23,16 +23,27 @@ def get_ffmpeg_bin() -> str:
 
 
 import subprocess
+import re
 
 def get_video_duration(video_path: str) -> float:
-    """Get the duration of a video in seconds using ffmpeg probe or fallback."""
+    """Get the duration of a video in seconds using ffmpeg directly (without requiring ffprobe)."""
     try:
         ffmpeg_bin = get_ffmpeg_bin()
-        probe = ffmpeg.probe(video_path, cmd=ffmpeg_bin)
-        format_info = probe.get("format", {})
-        return float(format_info.get("duration", 0.0))
-    except Exception:
-        return 0.0
+        res = subprocess.run(
+            [ffmpeg_bin, "-i", video_path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", res.stderr)
+        if match:
+            h, m, s = match.groups()
+            duration = int(h) * 3600 + int(m) * 60 + float(s)
+            return duration
+    except Exception as e:
+        logger.warning(f"Could not probe video duration for {video_path}: {e}")
+    return 0.0
 
 
 import time

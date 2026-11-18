@@ -130,7 +130,13 @@ async def upload_video(
     # Dispatch Stage 1 as a background thread
     background_tasks.add_task(transcribe_video, job_id, file_path, embed_captions)
 
-    return {"job_id": job_id}
+    return {
+        "job_id": job_id,
+        "status": "processing",
+        "progress": 0,
+        "eta_seconds": 15,
+        "filename": file.filename,
+    }
 
 
 class LanguageConfirmation(BaseModel):
@@ -150,10 +156,16 @@ async def confirm_language(
     job_data = JOB_STORE.get(job_id)
     if not job_data:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job_data.get("status") != "awaiting_user_confirmation":
+
+    current_status = job_data.get("status")
+    # If already transcribing, return idempotent success to avoid race condition / double-click errors
+    if current_status == "transcribing":
+        return {"status": "transcription_started", "language": body.language, "accent_id": body.accent_id}
+
+    if current_status != "awaiting_user_confirmation":
         raise HTTPException(
             status_code=400,
-            detail=f"Job is not awaiting confirmation (status: {job_data.get('status')})",
+            detail=f"Job is not awaiting confirmation (status: {current_status})",
         )
 
     # Update job with user's choice

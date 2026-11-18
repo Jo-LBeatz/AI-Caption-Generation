@@ -314,14 +314,19 @@ def evaluate_video_morality(transcript_text: str) -> Dict[str, Any]:
     """
     Main evaluation entry point.
     First tries LLM semantic analysis (if configured), then falls back to local semantic evaluator.
+    Shielded with try/except to guarantee that morality checks never crash the transcription pipeline.
     """
     if not transcript_text or not transcript_text.strip():
         return {"is_evil": False}
 
-    # 1. Try LLM if API key exists
-    llm_result = _try_llm_evaluation(transcript_text)
-    if llm_result is not None:
-        return llm_result
+    try:
+        # 1. Try LLM if API key exists
+        llm_result = _try_llm_evaluation(transcript_text)
+        if llm_result is not None:
+            return llm_result
 
-    # 2. Local semantic analyzer
-    return _local_semantic_evaluation(transcript_text)
+        # 2. Local semantic analyzer
+        return _local_semantic_evaluation(transcript_text)
+    except Exception as e:
+        logger.warning(f"Error during morality evaluation: {e}. Defaulting to clean.", exc_info=True)
+        return {"is_evil": False}

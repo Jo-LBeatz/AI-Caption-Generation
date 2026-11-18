@@ -207,12 +207,11 @@ export default function App() {
   // Real-time 1-second countdown ticking timer
   const isAwaitingConfirmation = status?.status === 'awaiting_user_confirmation';
   const isProcessing =
-    jobId &&
-    status &&
+    !!jobId &&
     !isAwaitingConfirmation &&
-    status.status !== 'completed' &&
-    status.status !== 'failed' &&
-    status.status !== 'morality_warning';
+    status?.status !== 'completed' &&
+    status?.status !== 'failed' &&
+    status?.status !== 'morality_warning';
 
   useEffect(() => {
     if (!isProcessing) return;
@@ -228,12 +227,14 @@ export default function App() {
   // Status Polling Effect
   useEffect(() => {
     let interval: any;
+    let isMounted = true;
     const terminalStatuses = ['completed', 'failed', 'awaiting_user_confirmation', 'morality_warning'];
 
     if (jobId && (!status || !terminalStatuses.includes(status.status))) {
-      interval = setInterval(async () => {
+      const fetchStatus = async () => {
         try {
           const response = await axios.get<JobStatus>(`${API_BASE_URL}/status/${jobId}`);
+          if (!isMounted) return;
           setStatus(response.data);
 
           if (response.data.eta_seconds !== undefined && response.data.eta_seconds > 0) {
@@ -241,7 +242,6 @@ export default function App() {
           }
 
           if (response.data.status === 'morality_warning') {
-            clearInterval(interval);
             // Trigger emergency audio alarm
             if (!alarmMuted) {
               alarmSounder.start();
@@ -249,7 +249,6 @@ export default function App() {
           }
 
           if (response.data.status === 'completed') {
-            clearInterval(interval);
             setCountdownSecs(0);
           }
 
@@ -260,22 +259,26 @@ export default function App() {
           ) {
             try {
               const srtResponse = await axios.get<{ content: string }>(`${API_BASE_URL}/srt/${jobId}`);
-              setSrtContent(srtResponse.data.content);
+              if (isMounted) setSrtContent(srtResponse.data.content);
             } catch (e) {
               // SRT in progress
             }
           }
-
-          if (response.data.status === 'failed' || response.data.status === 'awaiting_user_confirmation') {
-            clearInterval(interval);
-          }
         } catch (error) {
           console.error('Error fetching status:', error);
         }
-      }, 1500);
+      };
+
+      // Poll immediately without waiting for interval
+      fetchStatus();
+      interval = setInterval(fetchStatus, 1000);
     }
-    return () => clearInterval(interval);
-  }, [jobId, status, alarmMuted]);
+
+    return () => {
+      isMounted = false;
+      if (interval) clearInterval(interval);
+    };
+  }, [jobId, status?.status, alarmMuted]);
 
   // Clean up alarm sound when unmounting or leaving warning state
   useEffect(() => {
@@ -314,7 +317,17 @@ export default function App() {
           headers: { 'Content-Type': 'multipart/form-data' },
         }
       );
-      setJobId(response.data.job_id);
+      const newJobId = response.data.job_id;
+      setJobId(newJobId);
+      setStatus({
+        status: response.data.status || 'extracting_audio',
+        progress: response.data.progress || 5,
+        eta_seconds: response.data.eta_seconds || 15,
+        filename: file.name,
+        video_burned: false,
+        has_srt: false,
+      });
+      setCountdownSecs(response.data.eta_seconds || 15);
     } catch (error) {
       console.error('Upload error:', error);
       alert('Failed to upload video. Please try again.');
@@ -717,8 +730,119 @@ export default function App() {
               </div>
             </motion.div>
 
-          /* ── 4. Processing Screen with Real-Time Countdown ── */
-          ) : isProcessing ? (
+          /* ── 4. Completed Screen ── */
+          ) : status?.status === 'completed' ? (
+            <motion.div
+              key="completed"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-stone-950/80 backdrop-blur-xl border border-amber-500/20 rounded-3xl p-8 md:p-12 shadow-2xl"
+            >
+              <div className="flex flex-col md:flex-row gap-8 items-start">
+                <div className="flex-1 space-y-6 w-full">
+                  <div className="flex items-center gap-4 p-6 bg-amber-500/10 border border-amber-500/30 rounded-3xl">
+                    <div className="w-12 h-12 bg-amber-500/20 rounded-full flex items-center justify-center">
+                      <CheckCircle2 className="text-amber-400" size={28} />
+                    </div>
+                    <div>
+                      <h3 className="font-black text-white text-xl tracking-tight">Your Captions are Ready</h3>
+                      <p className="text-amber-500/70 text-xs font-bold uppercase tracking-widest">
+                        {status?.video_burned
+                          ? 'Burnt-in Video & .SRT Subtitles Produced'
+                          : 'High-Precision .SRT File Ready'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {status?.video_burned ? (
+                      <>
+                        <Button
+                          onClick={handleDownloadBoth}
+                          className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl shadow-amber-950/30"
+                        >
+                          <Download className="mr-2" size={22} /> Download Both (.mp4 + .srt)
+                        </Button>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <Button
+                            onClick={handleDownloadVideo}
+                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-amber-300"
+                          >
+                            <PlayCircle className="mr-2" size={18} /> Video (.mp4)
+                          </Button>
+                          <Button
+                            onClick={handleDownloadSrt}
+                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-stone-200"
+                          >
+                            <Download className="mr-2" size={18} /> Subtitle (.srt)
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <Button
+                        onClick={handleDownloadSrt}
+                        className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl"
+                      >
+                        <Download className="mr-2" size={22} /> Download .SRT Subtitles
+                      </Button>
+                    )}
+
+                    <Button
+                      variant="ghost"
+                      onClick={reset}
+                      className="w-full text-stone-500 hover:text-white uppercase text-xs font-black tracking-widest"
+                    >
+                      Process Another Video
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="flex-1 w-full h-[400px] bg-black/50 border border-stone-800 rounded-3xl overflow-hidden hidden md:block">
+                  <div className="p-4 border-b border-stone-800 bg-white/[0.02] flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-500/80 uppercase tracking-widest">SRT Preview</span>
+                    <span className="text-[10px] text-stone-500">UTF-8 Standard SubRip</span>
+                  </div>
+                  <textarea
+                    readOnly
+                    value={srtContent}
+                    className="w-full h-full bg-transparent p-6 text-stone-300 font-mono text-[11px] resize-none focus:outline-none scrollbar-hide"
+                  />
+                </div>
+              </div>
+            </motion.div>
+
+          /* ── 5. Failed Screen (ONLY when status.status === 'failed') ── */
+          ) : status?.status === 'failed' ? (
+            <motion.div
+              key="failed"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-stone-950/80 backdrop-blur-xl border border-red-500/20 rounded-3xl p-8 md:p-12 shadow-2xl"
+            >
+              <div className="text-center py-10 space-y-6">
+                <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-500/20">
+                  <AlertTriangle className="text-red-500" size={36} />
+                </div>
+                <div className="space-y-4">
+                  <h3 className="font-black text-white text-3xl tracking-tight">Process Stopped</h3>
+                  <p className="text-red-400 font-medium max-w-sm mx-auto p-4 bg-red-500/5 rounded-2xl border border-red-500/10 whitespace-pre-wrap text-sm">
+                    {status?.error || 'An unexpected error occurred during processing.'}
+                  </p>
+                </div>
+                <Button
+                  onClick={reset}
+                  className="px-8 h-12 bg-white text-black font-black uppercase tracking-tight rounded-full hover:bg-stone-200"
+                >
+                  Try Again
+                </Button>
+              </div>
+            </motion.div>
+
+          /* ── 6. Processing Screen (Default for ALL in-progress & transitional states) ── */
+          ) : (
             <motion.div
               key="processing"
               initial={{ scale: 0.95, opacity: 0 }}
@@ -756,6 +880,8 @@ export default function App() {
                       ? 'Burning Captions into Video...'
                       : status?.status === 'extracting_audio'
                       ? 'Extracting Audio Track...'
+                      : status?.status === 'detecting_language'
+                      ? 'Detecting Spoken Language...'
                       : 'Processing Video...'}
                   </h3>
                   <p className="text-stone-500 text-sm font-medium">
@@ -763,109 +889,6 @@ export default function App() {
                   </p>
                 </div>
               </div>
-            </motion.div>
-
-          /* ── 5. Completed / Failed Screen ── */
-          ) : (
-            <motion.div
-              key="result"
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-stone-950/80 backdrop-blur-xl border border-amber-500/20 rounded-3xl p-8 md:p-12 shadow-2xl"
-            >
-              {status?.status === 'completed' ? (
-                <div className="flex flex-col md:flex-row gap-8 items-start">
-                  <div className="flex-1 space-y-6 w-full">
-                    <div className="flex items-center gap-4 p-6 bg-amber-500/10 border border-amber-500/30 rounded-3xl">
-                      <div className="w-12 h-12 bg-amber-500/20 rounded-full flex items-center justify-center">
-                        <CheckCircle2 className="text-amber-400" size={28} />
-                      </div>
-                      <div>
-                        <h3 className="font-black text-white text-xl tracking-tight">Your Captions are Ready</h3>
-                        <p className="text-amber-500/70 text-xs font-bold uppercase tracking-widest">
-                          {status?.video_burned
-                            ? 'Burnt-in Video & .SRT Subtitles Produced'
-                            : 'High-Precision .SRT File Ready'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      {status?.video_burned ? (
-                        <>
-                          <Button
-                            onClick={handleDownloadBoth}
-                            className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl shadow-amber-950/30"
-                          >
-                            <Download className="mr-2" size={22} /> Download Both (.mp4 + .srt)
-                          </Button>
-
-                          <div className="grid grid-cols-2 gap-3">
-                            <Button
-                              onClick={handleDownloadVideo}
-                              className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-amber-300"
-                            >
-                              <PlayCircle className="mr-2" size={18} /> Video (.mp4)
-                            </Button>
-                            <Button
-                              onClick={handleDownloadSrt}
-                              className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-stone-200"
-                            >
-                              <Download className="mr-2" size={18} /> Subtitle (.srt)
-                            </Button>
-                          </div>
-                        </>
-                      ) : (
-                        <Button
-                          onClick={handleDownloadSrt}
-                          className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl"
-                        >
-                          <Download className="mr-2" size={22} /> Download .SRT Subtitles
-                        </Button>
-                      )}
-
-                      <Button
-                        variant="ghost"
-                        onClick={reset}
-                        className="w-full text-stone-500 hover:text-white uppercase text-xs font-black tracking-widest"
-                      >
-                        Process Another Video
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="flex-1 w-full h-[400px] bg-black/50 border border-stone-800 rounded-3xl overflow-hidden hidden md:block">
-                    <div className="p-4 border-b border-stone-800 bg-white/[0.02] flex items-center justify-between">
-                      <span className="text-xs font-bold text-amber-500/80 uppercase tracking-widest">SRT Preview</span>
-                      <span className="text-[10px] text-stone-500">UTF-8 Standard SubRip</span>
-                    </div>
-                    <textarea
-                      readOnly
-                      value={srtContent}
-                      className="w-full h-full bg-transparent p-6 text-stone-300 font-mono text-[11px] resize-none focus:outline-none scrollbar-hide"
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-10 space-y-6">
-                  <div className="w-20 h-20 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-500/20">
-                    <AlertTriangle className="text-red-500" size={36} />
-                  </div>
-                  <div className="space-y-4">
-                    <h3 className="font-black text-white text-3xl tracking-tight">Process Stopped</h3>
-                    <p className="text-red-400 font-medium max-w-sm mx-auto p-4 bg-red-500/5 rounded-2xl border border-red-500/10 whitespace-pre-wrap text-sm">
-                      {status?.error || 'An unexpected error occurred during processing.'}
-                    </p>
-                  </div>
-                  <Button
-                    onClick={reset}
-                    className="px-8 h-12 bg-white text-black font-black uppercase tracking-tight rounded-full hover:bg-stone-200"
-                  >
-                    Try Again
-                  </Button>
-                </div>
-              )}
             </motion.div>
           )}
         </AnimatePresence>
