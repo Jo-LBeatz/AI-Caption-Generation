@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Globe, Mic2, ChevronDown, CheckCircle2, Loader2 } from 'lucide-react';
+import { Search, Globe, Mic2, ChevronDown, CheckCircle2, Loader2, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { CAPTION_PRESETS, type CaptionStyleConfig } from '@/components/CaptionStylePicker';
 
 // ---------------------------------------------------------------------------
 // Language data — all 99 Whisper-supported languages
@@ -198,6 +199,8 @@ interface LanguageAccentDialogProps {
   topCandidates: Array<{ language: string; probability: number }>;
   onConfirm: (language: string, accentId: string) => void;
   isConfirming: boolean;
+  captionStyle?: CaptionStyleConfig;
+  onCaptionStyleChange?: (style: CaptionStyleConfig) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +238,8 @@ export function LanguageAccentDialog({
   topCandidates,
   onConfirm,
   isConfirming,
+  captionStyle,
+  onCaptionStyleChange,
 }: LanguageAccentDialogProps) {
   const [selectedLangCode, setSelectedLangCode] = useState<string>(
     detectedLanguage === 'auto' ? 'en' : detectedLanguage
@@ -460,6 +465,41 @@ export function LanguageAccentDialog({
           ))}
         </div>
       </div>
+
+      {/* Subtitle Style Aesthetic Preset Selector (if captionStyle provided) */}
+      {captionStyle && onCaptionStyleChange && (
+        <div className="space-y-2 pt-2 border-t border-white/10">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-black text-stone-400 uppercase tracking-widest flex items-center gap-1.5">
+              <Sparkles size={12} className="text-amber-400" />
+              Subtitle Aesthetic Preset
+            </label>
+            <span className="text-[10px] text-amber-500 font-semibold tracking-wide">
+              Subtitles Sized Accurately (13pt)
+            </span>
+          </div>
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            {CAPTION_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => onCaptionStyleChange(preset.config)}
+                className={`flex flex-col items-center p-2 rounded-xl border text-center transition-all ${
+                  captionStyle.preset === preset.id
+                    ? 'bg-amber-500/20 border-amber-500 text-white shadow-sm shadow-amber-500/20 scale-[1.02]'
+                    : 'bg-stone-900/60 border-white/10 text-stone-400 hover:border-white/20 hover:text-white'
+                }`}
+              >
+                <div
+                  className="w-4 h-4 rounded-full border border-black/40 mb-1"
+                  style={{ backgroundColor: preset.textColor }}
+                />
+                <span className="text-[10px] font-bold truncate max-w-full">{preset.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* CTA */}
       <Button

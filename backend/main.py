@@ -28,6 +28,7 @@ from pydantic import BaseModel
 import shutil
 
 from jobs import JOB_STORE
+from video_utils import STYLE_PRESETS
 from worker import (
     transcribe_video,
     transcribe_confirmed,
@@ -139,9 +140,34 @@ async def upload_video(
     }
 
 
+class CaptionStyleConfig(BaseModel):
+    preset: Optional[str] = "classic"
+    font_name: Optional[str] = "Arial"
+    font_size: Optional[int] = 13
+    primary_color: Optional[str] = "#FFFFFF"
+    outline_color: Optional[str] = "#000000"
+    outline_width: Optional[float] = 1.2
+    border_style: Optional[int] = 1
+    shadow_depth: Optional[float] = 0.8
+    back_color: Optional[str] = "#000000"
+    back_opacity: Optional[float] = 0.0
+    bold: Optional[bool] = False
+    italic: Optional[bool] = False
+    uppercase: Optional[bool] = False
+    alignment: Optional[int] = 2
+    margin_v: Optional[int] = 24
+
+
 class LanguageConfirmation(BaseModel):
     language: str          # e.g. "en", "fr", "ar", "auto"
     accent_id: str = "none"  # e.g. "en_british", "es_mexican"
+    caption_style: Optional[CaptionStyleConfig] = None
+
+
+@app.get("/caption-style-presets")
+async def get_caption_style_presets():
+    """Return available high-level caption aesthetic presets."""
+    return STYLE_PRESETS
 
 
 @app.post("/confirm-language/{job_id}")
@@ -150,8 +176,9 @@ async def confirm_language(
     body: LanguageConfirmation,
 ):
     """
-    Stage 2: User confirms (or overrides) the detected language and selects
-    an accent. Triggers full transcription in a background thread.
+    Stage 2: User confirms (or overrides) the detected language, selects
+    an accent, and optionally configures caption aesthetics / styles.
+    Triggers full transcription in a background thread.
     """
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -168,12 +195,21 @@ async def confirm_language(
             detail=f"Job is not awaiting confirmation (status: {current_status})",
         )
 
-    # Update job with user's choice
+    style_dict = None
+    if body.caption_style:
+        style_dict = (
+            body.caption_style.model_dump()
+            if hasattr(body.caption_style, "model_dump")
+            else body.caption_style.dict()
+        )
+
+    # Update job with user's choices
     JOB_STORE[job_id].update({
         "status": "transcribing",
         "progress": 25,
         "confirmed_language": body.language,
         "confirmed_accent_id": body.accent_id,
+        "caption_style": style_dict,
     })
 
     # Launch Stage 2 in a daemon thread
@@ -232,6 +268,8 @@ async def get_status(job_id: str):
         "video_burned": job_data.get("video_burned", False),
         "has_srt": job_data.get("has_srt", False),
         "morality_alert": job_data.get("morality_alert"),
+        "ultimate_message": job_data.get("ultimate_message"),
+        "caption_style": job_data.get("caption_style"),
         "error": job_data.get("error"),
         "detected_language": job_data.get("detected_language"),
         "detected_probability": job_data.get("detected_probability"),

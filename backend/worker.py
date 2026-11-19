@@ -56,7 +56,7 @@ except ImportError:
 
 from jobs import JOB_STORE
 from video_utils import embed_subtitles, get_video_duration
-from morality import evaluate_video_morality
+from morality import evaluate_video_morality, extract_ultimate_video_message
 
 if sys.platform == "win32":
     try:
@@ -374,10 +374,11 @@ HALLUCINATION_BLACKLIST = [
     "all rights reserved", "[applause]", "[music]", "[laughter]"
 ]
 
-def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 40):
+def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 40, uppercase: bool = False):
     """
     Format raw transcript segments into clean, accurate SRT blocks.
     Removes hallucination loops and YouTube noise artifacts.
+    Supports optional uppercase subtitle transformation.
     """
     word_items = []
     
@@ -462,6 +463,8 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
         cue_start = format_timestamp(cue_lines[0]["start"])
         cue_end = format_timestamp(cue_lines[-1]["end"])
         cue_text = "\n".join(l["text"] for l in cue_lines)
+        if uppercase:
+            cue_text = cue_text.upper()
         
         # Deduplicate consecutive hallucination loops
         if cue_text.lower() == last_cue_text.lower():
@@ -591,8 +594,12 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
             final_lang = result.get("language", language)
             raw_segments_list = result.get("segments", [])
 
-        # --- Format SRT Cues (Enforce 2 Lines Max per Cue) ---
-        srt_segments, full_text = format_srt_cues(raw_segments_list, max_lines=2, max_chars_per_line=40)
+        # --- Format SRT Cues (Enforce 2 Lines Max per Cue & Style Case) ---
+        caption_style = job_data.get("caption_style") or {}
+        is_uppercase = bool(caption_style.get("uppercase", False))
+        srt_segments, full_text = format_srt_cues(
+            raw_segments_list, max_lines=2, max_chars_per_line=40, uppercase=is_uppercase
+        )
 
         # --- Save SRT File ---
         JOB_STORE[job_id].update({"status": "generating_srt", "progress": 73, "eta_seconds": 3})
@@ -604,9 +611,17 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         JOB_STORE[job_id]["has_srt"] = True
         JOB_STORE[job_id]["final_language"] = final_lang
 
+        # --- Extract Ultimate Video Message & Motto ---
+        full_transcript = " ".join(full_text)
+        try:
+            ultimate_msg = extract_ultimate_video_message(full_transcript)
+            JOB_STORE[job_id]["ultimate_message"] = ultimate_msg
+            logger.info(f"Job {job_id}: Extracted ultimate message: {ultimate_msg.get('motto')}")
+        except Exception as e:
+            logger.warning(f"Could not extract ultimate message for job {job_id}: {e}")
+
         # --- Moral Law Check (Moses' 10 Commandments & Christ's 2 Commandments) ---
         JOB_STORE[job_id].update({"status": "checking_morality", "progress": 74, "eta_seconds": 2})
-        full_transcript = " ".join(full_text)
         morality_result = evaluate_video_morality(full_transcript)
 
         if morality_result.get("is_evil"):
@@ -665,7 +680,9 @@ def finalize_transcription(job_id: str):
             if job_id in JOB_STORE:
                 JOB_STORE[job_id]["eta_seconds"] = max(1, rem_sec)
 
+        caption_style = job_data.get("caption_style")
         if embed_subtitles(video_path, srt_path, burned_video_path,
+                           style_config=caption_style,
                            progress_callback=_update_burn_prog,
                            eta_callback=_update_burn_eta):
             burning_successful = True

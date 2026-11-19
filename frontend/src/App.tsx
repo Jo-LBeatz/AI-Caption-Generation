@@ -14,11 +14,20 @@ import {
   Smartphone,
   ShieldAlert,
   Flame,
+  Sparkles,
+  Quote,
+  Compass,
+  Tag,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { AnimatedDownload } from '@/components/ui/animated-download';
 import { LanguageAccentDialog } from '@/components/LanguageAccentDialog';
+import {
+  CaptionStylePicker,
+  CAPTION_PRESETS,
+  type CaptionStyleConfig,
+} from '@/components/CaptionStylePicker';
 
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
@@ -35,6 +44,14 @@ interface MoralityAlert {
   commandment_violated: string;
   reason: string;
   scriptural_basis: string;
+}
+
+interface UltimateMessage {
+  understood: boolean;
+  motto: string;
+  core_message: string;
+  moral_tone: string;
+  key_themes: string[];
 }
 
 interface JobStatus {
@@ -57,6 +74,8 @@ interface JobStatus {
   video_burned?: boolean;
   has_srt?: boolean;
   morality_alert?: MoralityAlert;
+  ultimate_message?: UltimateMessage;
+  caption_style?: CaptionStyleConfig;
   error?: string;
   detected_language?: string;
   detected_probability?: number;
@@ -174,6 +193,7 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [srtContent, setSrtContent] = useState<string>('');
   const [embedCaptions, setEmbedCaptions] = useState(false);
+  const [captionStyle, setCaptionStyle] = useState<CaptionStyleConfig>(CAPTION_PRESETS[0].config);
   const [isConfirming, setIsConfirming] = useState(false);
   const [alarmMuted, setAlarmMuted] = useState(false);
   const [serverIp, setServerIp] = useState<string>('');
@@ -343,6 +363,7 @@ export default function App() {
       await axios.post(`${API_BASE_URL}/confirm-language/${jobId}`, {
         language,
         accent_id: accentId,
+        caption_style: captionStyle,
       });
       setStatus((prev) => (prev ? { ...prev, status: 'transcribing', progress: 25 } : prev));
     } catch (error) {
@@ -581,22 +602,36 @@ export default function App() {
                   )}
                 </div>
 
-                <div
-                  className="flex items-center gap-2.5 px-3 py-1 cursor-pointer group"
-                  onClick={() => setEmbedCaptions(!embedCaptions)}
-                >
+                <div className="w-full space-y-4">
                   <div
-                    className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${
-                      embedCaptions
-                        ? 'bg-amber-600 border-amber-600'
-                        : 'border-stone-700 group-hover:border-amber-500/50'
-                    }`}
+                    className="flex items-center gap-2.5 px-3 py-1 cursor-pointer group"
+                    onClick={() => setEmbedCaptions(!embedCaptions)}
                   >
-                    {embedCaptions && <CheckCircle2 size={13} className="text-black stroke-[3]" />}
+                    <div
+                      className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${
+                        embedCaptions
+                          ? 'bg-amber-600 border-amber-600'
+                          : 'border-stone-700 group-hover:border-amber-500/50'
+                      }`}
+                    >
+                      {embedCaptions && <CheckCircle2 size={13} className="text-black stroke-[3]" />}
+                    </div>
+                    <span className="text-sm font-semibold text-stone-300 select-none">
+                      Burn subtitles into video (Produces both burnt-in video + .SRT file)
+                    </span>
                   </div>
-                  <span className="text-sm font-semibold text-stone-300 select-none">
-                    Burn captions into video (Produces both burnt-in video + .SRT file)
-                  </span>
+
+                  {/* High-Level Caption Style & Aesthetic Picker */}
+                  {embedCaptions && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="pt-2"
+                    >
+                      <CaptionStylePicker value={captionStyle} onChange={setCaptionStyle} />
+                    </motion.div>
+                  )}
                 </div>
 
                 <Button
@@ -631,6 +666,8 @@ export default function App() {
                 topCandidates={status?.detected_top_candidates || []}
                 onConfirm={handleLanguageConfirm}
                 isConfirming={isConfirming}
+                captionStyle={embedCaptions ? captionStyle : undefined}
+                onCaptionStyleChange={setCaptionStyle}
               />
             </motion.div>
 
@@ -737,8 +774,81 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-stone-950/80 backdrop-blur-xl border border-amber-500/20 rounded-3xl p-8 md:p-12 shadow-2xl"
+              className="bg-stone-950/80 backdrop-blur-xl border border-amber-500/20 rounded-3xl p-6 md:p-10 shadow-2xl space-y-6"
             >
+              {/* AI Video Understanding: Ultimate Message & Motto Banner */}
+              <div className="w-full bg-gradient-to-br from-amber-950/40 via-stone-900/70 to-black/90 border border-amber-500/35 rounded-3xl p-6 md:p-8 space-y-5 shadow-2xl relative overflow-hidden">
+                <div className="absolute -top-12 -right-12 w-48 h-48 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+
+                <div className="flex items-center justify-between flex-wrap gap-3 border-b border-amber-500/20 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-amber-500/20 flex items-center justify-center border border-amber-500/40 shadow-inner">
+                      <Sparkles size={20} className="text-amber-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-black uppercase tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-amber-400 to-yellow-500">
+                        AI Video Understanding
+                      </h4>
+                      <p className="text-xs text-stone-400">
+                        Synthesized Moral Thesis &amp; Core Motto of the Video
+                      </p>
+                    </div>
+                  </div>
+                  <span className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-xs font-bold shadow-sm shadow-emerald-500/20">
+                    <CheckCircle2 size={14} className="text-emerald-400" />
+                    AI Comprehension Verified
+                  </span>
+                </div>
+
+                {/* Motto Box */}
+                <div className="relative bg-black/60 border border-amber-500/30 rounded-2xl p-5 md:p-6 pl-10 md:pl-12 shadow-inner">
+                  <Quote className="absolute top-4 left-3 md:left-4 text-amber-500/40 -scale-x-100" size={24} />
+                  <div className="text-[10px] font-mono font-black uppercase tracking-widest text-amber-500/80 mb-1.5">
+                    Motto of the Video
+                  </div>
+                  <div className="text-xl md:text-2xl font-serif italic font-bold text-amber-200 leading-snug">
+                    "{status?.ultimate_message?.motto || 'Proclaim the Truth with clarity and virtue.'}"
+                  </div>
+                </div>
+
+                {/* Core Message & Intended Purpose */}
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-amber-400/90 flex items-center gap-1.5">
+                    <Compass size={13} className="text-amber-400" /> Core Message &amp; Narrative Purpose
+                  </div>
+                  <p className="text-stone-300 text-sm leading-relaxed whitespace-pre-wrap pl-1 font-medium">
+                    {status?.ultimate_message?.core_message ||
+                      'The AI caption system has verified and understood the spoken dialogue and thematic intent of this video.'}
+                  </p>
+                </div>
+
+                {/* Badges: Moral Tone & Themes */}
+                <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-white/5">
+                  <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500">Moral Tone:</span>
+                  <span className="px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-semibold">
+                    {status?.ultimate_message?.moral_tone || 'Expository & Uplifting'}
+                  </span>
+
+                  {status?.ultimate_message?.key_themes && status.ultimate_message.key_themes.length > 0 && (
+                    <>
+                      <span className="text-[10px] font-mono uppercase tracking-wider text-stone-500 ml-3">
+                        Key Themes:
+                      </span>
+                      {status.ultimate_message.key_themes.map((theme, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-stone-900 border border-stone-800 text-stone-300 text-xs font-medium"
+                        >
+                          <Tag size={10} className="text-amber-400/80" />
+                          {theme}
+                        </span>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Ready Header & Actions Grid */}
               <div className="flex flex-col md:flex-row gap-8 items-start">
                 <div className="flex-1 space-y-6 w-full">
                   <div className="flex items-center gap-4 p-6 bg-amber-500/10 border border-amber-500/30 rounded-3xl">

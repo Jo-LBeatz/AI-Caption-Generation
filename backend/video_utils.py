@@ -47,10 +47,183 @@ def get_video_duration(video_path: str) -> float:
 
 
 import time
+from typing import Optional, Dict, Any
 
-def embed_subtitles(video_path, srt_path, output_path, progress_callback=None, eta_callback=None):
+# ---------------------------------------------------------------------------
+# Caption Style & Aesthetic Definitions
+# Matches high-level AI captions software presets with authentic subtitle sizing
+# ---------------------------------------------------------------------------
+def hex_to_ass_color(hex_str: str, alpha: int = 0) -> str:
     """
-    Burn subtitles (.srt) into a video (.mp4) using FFmpeg.
+    Converts a standard web hex color string (#RRGGBB) to ASS color format (&HAABBGGRR).
+    Alpha is 0 for 100% opaque, 255 (0xFF) for 100% transparent.
+    """
+    if not hex_str:
+        return f"&H{alpha:02X}FFFFFF"
+    clean = hex_str.lstrip("#")
+    if len(clean) == 3:
+        clean = "".join([c * 2 for c in clean])
+    if len(clean) == 6:
+        r, g, b = clean[0:2], clean[2:4], clean[4:6]
+        return f"&H{alpha:02X}{b.upper()}{g.upper()}{r.upper()}"
+    return f"&H{alpha:02X}FFFFFF"
+
+
+STYLE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "classic": {
+        "name": "Classic Subtitle",
+        "font_name": "Arial",
+        "font_size": 13,             # Proper subtitle size: restrained, clear, unobtrusive
+        "primary_color": "#FFFFFF",
+        "outline_color": "#000000",
+        "outline_width": 1.2,
+        "border_style": 1,           # Outline + drop shadow
+        "shadow_depth": 0.8,
+        "back_color": "#000000",
+        "back_opacity": 0.0,
+        "bold": False,
+        "italic": False,
+        "alignment": 2,              # Bottom center
+        "margin_v": 24,
+    },
+    "sacred_gold": {
+        "name": "Sacred Gold",
+        "font_name": "Georgia",
+        "font_size": 13,
+        "primary_color": "#FFD700",  # Sacred golden amber
+        "outline_color": "#1A0F00",
+        "outline_width": 1.2,
+        "border_style": 1,
+        "shadow_depth": 0.8,
+        "back_color": "#000000",
+        "back_opacity": 0.0,
+        "bold": False,
+        "italic": False,
+        "alignment": 2,
+        "margin_v": 24,
+    },
+    "cinematic_box": {
+        "name": "Cinematic Box",
+        "font_name": "Arial",
+        "font_size": 12,             # Clean Netflix/Prime streaming style
+        "primary_color": "#FFFFFF",
+        "outline_color": "#000000",
+        "outline_width": 0.0,
+        "border_style": 3,           # Translucent bounding box
+        "shadow_depth": 0.0,
+        "back_color": "#000000",
+        "back_opacity": 0.60,        # 60% translucent dark pill box
+        "bold": False,
+        "italic": False,
+        "alignment": 2,
+        "margin_v": 24,
+    },
+    "yellow_pop": {
+        "name": "Yellow Pop",
+        "font_name": "Trebuchet MS",
+        "font_size": 13,
+        "primary_color": "#FFF000",  # High-visibility yellow
+        "outline_color": "#000000",
+        "outline_width": 1.4,
+        "border_style": 1,
+        "shadow_depth": 0.8,
+        "back_color": "#000000",
+        "back_opacity": 0.0,
+        "bold": False,
+        "italic": False,
+        "alignment": 2,
+        "margin_v": 24,
+    },
+    "bold_impact": {
+        "name": "Bold Modern",
+        "font_name": "Trebuchet MS",
+        "font_size": 13,
+        "primary_color": "#FFFFFF",
+        "outline_color": "#000000",
+        "outline_width": 1.6,
+        "border_style": 1,
+        "shadow_depth": 1.0,
+        "back_color": "#000000",
+        "back_opacity": 0.0,
+        "bold": True,
+        "italic": False,
+        "alignment": 2,
+        "margin_v": 24,
+    },
+    "minimalist": {
+        "name": "Minimalist White",
+        "font_name": "Segoe UI",
+        "font_size": 12,
+        "primary_color": "#F1F5F9",
+        "outline_color": "#0F172A",
+        "outline_width": 0.8,
+        "border_style": 1,
+        "shadow_depth": 0.0,
+        "back_color": "#000000",
+        "back_opacity": 0.0,
+        "bold": False,
+        "italic": False,
+        "alignment": 2,
+        "margin_v": 22,
+    },
+}
+
+
+def build_ass_force_style(style_config: Optional[dict] = None) -> str:
+    """
+    Construct the ASS force_style string for FFmpeg subtitles filter.
+    Guarantees captions are formatted as genuine subtitles with clean, restrained sizing.
+    """
+    cfg = dict(STYLE_PRESETS["classic"])
+    if style_config:
+        preset_key = style_config.get("preset", "classic")
+        if preset_key in STYLE_PRESETS:
+            cfg.update(STYLE_PRESETS[preset_key])
+        for k, v in style_config.items():
+            if v is not None:
+                cfg[k] = v
+
+    # Enforce subtitle sizing: cap between 10 and 15pt so captions never become oversized
+    raw_size = int(cfg.get("font_size", 13))
+    font_size = max(10, min(15, raw_size))
+
+    font_name = cfg.get("font_name", "Arial")
+    pri_col = hex_to_ass_color(cfg.get("primary_color", "#FFFFFF"), alpha=0)
+    out_col = hex_to_ass_color(cfg.get("outline_color", "#000000"), alpha=0)
+
+    # Backing box / shadow color
+    back_op = float(cfg.get("back_opacity", 0.0))
+    back_alpha = int((1.0 - back_op) * 255)
+    back_col = hex_to_ass_color(cfg.get("back_color", "#000000"), alpha=back_alpha)
+
+    border_style = int(cfg.get("border_style", 1))
+    outline = float(cfg.get("outline_width", 1.2))
+    shadow = float(cfg.get("shadow_depth", 0.8))
+    bold = 1 if cfg.get("bold") else 0
+    italic = 1 if cfg.get("italic") else 0
+    alignment = int(cfg.get("alignment", 2))
+    margin_v = int(cfg.get("margin_v", 24))
+
+    style_parts = [
+        f"Fontname={font_name}",
+        f"FontSize={font_size}",
+        f"PrimaryColour={pri_col}",
+        f"OutlineColour={out_col}",
+        f"BackColour={back_col}",
+        f"BorderStyle={border_style}",
+        f"Outline={outline}",
+        f"Shadow={shadow}",
+        f"Bold={bold}",
+        f"Italic={italic}",
+        f"Alignment={alignment}",
+        f"MarginV={margin_v}",
+    ]
+    return ",".join(style_parts)
+
+
+def embed_subtitles(video_path, srt_path, output_path, style_config=None, progress_callback=None, eta_callback=None):
+    """
+    Burn subtitles (.srt) into a video (.mp4) using FFmpeg with customizable styles.
     Optimized for Windows path escaping, GPU NVENC acceleration when available,
     multi-threaded ultrafast CPU encoding fallback, and real-time progress updates.
     """
@@ -94,11 +267,8 @@ def embed_subtitles(video_path, srt_path, output_path, progress_callback=None, e
             process.wait()
             return process.returncode == 0
 
-        sub_filter = (
-            f"subtitles='{escaped_srt}':force_style="
-            "'FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80050504,"
-            "BorderStyle=1,Outline=1.5,Shadow=0,MarginV=25,Alignment=2'"
-        )
+        force_style_str = build_ass_force_style(style_config)
+        sub_filter = f"subtitles='{escaped_srt}':force_style='{force_style_str}'"
 
         # Try GPU NVENC acceleration first if CUDA is available
         if torch.cuda.is_available():
