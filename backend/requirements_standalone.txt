@@ -22,3 +22,4 @@ python-jose[cryptography]
 dnspython
 numpy
 tkinterweb
+httpx

@@ -141,11 +141,11 @@ echo ============================================================
 echo   BUILD COMPLETE
 echo ============================================================
 echo.
-echo   Distributable folder : dist\RegulaVitae_Captions\
-if exist "installer_output\RegulaVitae_Captions_Setup_v1.0.0.exe" (
-    echo   Windows installer    : installer_output\RegulaVitae_Captions_Setup_v1.0.0.exe
+echo   Distributable folder : dist\Verbum\
+if exist "installer_output\Verbum_Setup_v2.0.0.exe" (
+    echo   Windows installer    : installer_output\Verbum_Setup_v2.0.0.exe
 )
 echo.
-echo   To test locally, run: dist\RegulaVitae_Captions\RegulaVitae_Captions.exe
+echo   To test locally, run: dist\Verbum\Verbum.exe
 echo.
 pause

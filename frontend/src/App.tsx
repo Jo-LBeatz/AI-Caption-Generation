@@ -191,6 +191,8 @@ export default function App() {
   const [status, setStatus] = useState<JobStatus | null>(null);
   const [countdownSecs, setCountdownSecs] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [downloadingState, setDownloadingState] = useState<'video' | 'srt' | 'both' | null>(null);
   const [srtContent, setSrtContent] = useState<string>('');
   const [embedCaptions, setEmbedCaptions] = useState(false);
   const [captionStyle, setCaptionStyle] = useState<CaptionStyleConfig>(CAPTION_PRESETS[0].config);
@@ -321,6 +323,7 @@ export default function App() {
     if (!file) return;
 
     setIsUploading(true);
+    setUploadProgress(0);
     setSrtContent('');
     setCountdownSecs(null);
     setAlarmMuted(false);
@@ -330,11 +333,19 @@ export default function App() {
     formData.append('file', file);
 
     try {
+      // NOTE: Never manually set 'Content-Type': 'multipart/form-data' in Axios
+      // Omitting it allows Axios/browser to automatically insert the exact multipart boundary
       const response = await axios.post(
         `${API_BASE_URL}/upload?embed_captions=${embedCaptions}`,
         formData,
         {
-          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 0, // No client timeout for multi-GB file uploads
+          onUploadProgress: (progressEvent) => {
+            if (progressEvent.total) {
+              const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+              setUploadProgress(percent);
+            }
+          },
         }
       );
       const newJobId = response.data.job_id;
@@ -348,11 +359,13 @@ export default function App() {
         has_srt: false,
       });
       setCountdownSecs(response.data.eta_seconds || 15);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Upload error:', error);
-      alert('Failed to upload video. Please try again.');
+      const detailMsg = error.response?.data?.detail || error.message || 'Network communication error';
+      alert(`Upload Failed: ${detailMsg}\n\nPlease verify your connection and try again.`);
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -401,87 +414,91 @@ export default function App() {
   const handleDownloadSrt = async () => {
     if (!jobId) return;
 
-    const pyApi = (window as any).pywebview?.api;
-    if (pyApi?.save_srt) {
-      try {
-        const suggestedName = status?.filename
-          ? status.filename.replace(/\.[^/.]+$/, '') + '.srt'
-          : `captions_${jobId.slice(0, 8)}.srt`;
-        const result = await pyApi.save_srt(jobId, suggestedName);
-        if (result?.error && result.error !== 'cancelled') {
-          alert(`Could not save SRT file: ${result.error}`);
-        }
-      } catch (e) {
-        console.error('pywebview save_srt error', e);
-        alert('Failed to save SRT file via native dialog.');
-      }
-      return;
-    }
-
+    setDownloadingState('srt');
     try {
-      const response = await axios.get(`${API_BASE_URL}/download/${jobId}`, {
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const pyApi = (window as any).pywebview?.api;
+      if (pyApi?.save_srt) {
+        try {
+          const suggestedName = status?.filename
+            ? status.filename.replace(/\.[^/.]+$/, '') + '.srt'
+            : `captions_${jobId.slice(0, 8)}.srt`;
+          const result = await pyApi.save_srt(jobId, suggestedName);
+          if (result?.error && result.error !== 'cancelled') {
+            alert(`Could not save SRT file: ${result.error}`);
+          }
+        } catch (e) {
+          console.error('pywebview save_srt error', e);
+          alert('Failed to save SRT file via native dialog.');
+        }
+        return;
+      }
+
+      // Browser mode: Trigger immediate native browser download streaming link (no in-memory buffering!)
+      const baseName = status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'captions';
+      const downloadUrl = `${API_BASE_URL}/download/${jobId}`;
       const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', `${status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'captions'}.srt`);
+      link.href = downloadUrl;
+      link.setAttribute('download', `${baseName}.srt`);
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.URL.revokeObjectURL(url);
     } catch (e) {
       console.error('Download SRT error', e);
       alert('Failed to download SRT file.');
+    } finally {
+      setDownloadingState(null);
     }
   };
 
   const handleDownloadVideo = async () => {
     if (!jobId) return;
 
-    const pyApi = (window as any).pywebview?.api;
-    if (pyApi?.save_video) {
-      try {
-        const baseName = status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video';
-        const suggestedName = `${baseName}_captioned.mp4`;
-        const result = await pyApi.save_video(jobId, suggestedName);
-        if (result?.error && result.error !== 'cancelled') {
-          alert(`Could not save video: ${result.error}`);
-        }
-      } catch (e) {
-        console.error('pywebview save_video error', e);
-        alert('Failed to save video via native dialog.');
-      }
-      return;
-    }
-
+    setDownloadingState('video');
     try {
-      const response = await axios.get(`${API_BASE_URL}/download-video/${jobId}`, {
-        responseType: 'blob',
-      });
-      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const pyApi = (window as any).pywebview?.api;
+      if (pyApi?.save_video) {
+        try {
+          const baseName = status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video';
+          const suggestedName = `${baseName}_captioned.mp4`;
+          const result = await pyApi.save_video(jobId, suggestedName);
+          if (result?.error && result.error !== 'cancelled') {
+            alert(`Could not save video: ${result.error}`);
+          }
+        } catch (e) {
+          console.error('pywebview save_video error', e);
+          alert('Failed to save video via native dialog.');
+        }
+        return;
+      }
+
+      // Browser mode: Trigger immediate native browser download streaming link (no in-memory buffering!)
+      const baseName = status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video';
+      const downloadUrl = `${API_BASE_URL}/download-video/${jobId}`;
       const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute(
-        'download',
-        `${status?.filename ? status.filename.replace(/\.[^/.]+$/, '') : 'video'}_captioned.mp4`
-      );
+      link.href = downloadUrl;
+      link.setAttribute('download', `${baseName}_captioned.mp4`);
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.URL.revokeObjectURL(url);
     } catch (e) {
       console.error('Download video error', e);
       alert('Failed to download video file.');
+    } finally {
+      setDownloadingState(null);
     }
   };
 
   // Download both .mp4 and .srt together
   const handleDownloadBoth = async () => {
-    await handleDownloadVideo();
-    setTimeout(() => {
-      handleDownloadSrt();
-    }, 800);
+    setDownloadingState('both');
+    try {
+      await handleDownloadVideo();
+      setTimeout(async () => {
+        await handleDownloadSrt();
+      }, 700);
+    } finally {
+      setTimeout(() => setDownloadingState(null), 1200);
+    }
   };
 
   const reset = () => {
@@ -490,6 +507,8 @@ export default function App() {
     setJobId(null);
     setStatus(null);
     setCountdownSecs(null);
+    setUploadProgress(null);
+    setDownloadingState(null);
     setSrtContent('');
     setIsConfirming(false);
     setAlarmMuted(false);
@@ -642,7 +661,7 @@ export default function App() {
                   {isUploading ? (
                     <>
                       <Loader2 className="animate-spin mr-3" size={24} />
-                      Uploading &amp; Analyzing...
+                      {uploadProgress !== null ? `Uploading ${uploadProgress}%...` : 'Uploading & Analyzing...'}
                     </>
                   ) : (
                     <>✦ Generate Captions</>
@@ -870,32 +889,68 @@ export default function App() {
                       <>
                         <Button
                           onClick={handleDownloadBoth}
-                          className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl shadow-amber-950/30"
+                          disabled={downloadingState !== null}
+                          className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl shadow-amber-950/30 disabled:opacity-70"
                         >
-                          <Download className="mr-2" size={22} /> Download Both (.mp4 + .srt)
+                          {downloadingState === 'both' ? (
+                            <>
+                              <Loader2 className="animate-spin mr-2" size={22} /> Preparing Both Files...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="mr-2" size={22} /> Download Both (.mp4 + .srt)
+                            </>
+                          )}
                         </Button>
 
                         <div className="grid grid-cols-2 gap-3">
                           <Button
                             onClick={handleDownloadVideo}
-                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-amber-300"
+                            disabled={downloadingState !== null}
+                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-amber-300 disabled:opacity-70"
                           >
-                            <PlayCircle className="mr-2" size={18} /> Video (.mp4)
+                            {downloadingState === 'video' ? (
+                              <>
+                                <Loader2 className="animate-spin mr-2" size={18} /> Preparing Video...
+                              </>
+                            ) : (
+                              <>
+                                <PlayCircle className="mr-2" size={18} /> Video (.mp4)
+                              </>
+                            )}
                           </Button>
                           <Button
                             onClick={handleDownloadSrt}
-                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-stone-200"
+                            disabled={downloadingState !== null}
+                            className="h-12 text-sm font-bold rounded-xl bg-stone-900 border border-stone-800 hover:bg-stone-800 text-stone-200 disabled:opacity-70"
                           >
-                            <Download className="mr-2" size={18} /> Subtitle (.srt)
+                            {downloadingState === 'srt' ? (
+                              <>
+                                <Loader2 className="animate-spin mr-2" size={18} /> Preparing .SRT...
+                              </>
+                            ) : (
+                              <>
+                                <Download className="mr-2" size={18} /> Subtitle (.srt)
+                              </>
+                            )}
                           </Button>
                         </div>
                       </>
                     ) : (
                       <Button
                         onClick={handleDownloadSrt}
-                        className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl"
+                        disabled={downloadingState !== null}
+                        className="w-full h-16 text-lg font-black rounded-2xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-600 hover:to-yellow-700 text-black shadow-xl disabled:opacity-70"
                       >
-                        <Download className="mr-2" size={22} /> Download .SRT Subtitles
+                        {downloadingState === 'srt' ? (
+                          <>
+                            <Loader2 className="animate-spin mr-2" size={22} /> Preparing Subtitles...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="mr-2" size={22} /> Download .SRT Subtitles
+                          </>
+                        )}
                       </Button>
                     )}
 
@@ -938,8 +993,8 @@ export default function App() {
                 </div>
                 <div className="space-y-4">
                   <h3 className="font-black text-white text-3xl tracking-tight">Process Stopped</h3>
-                  <p className="text-red-400 font-medium max-w-sm mx-auto p-4 bg-red-500/5 rounded-2xl border border-red-500/10 whitespace-pre-wrap text-sm">
-                    {status?.error || 'An unexpected error occurred during processing.'}
+                  <p className="text-red-400 font-medium max-w-lg mx-auto p-4 bg-red-500/5 rounded-2xl border border-red-500/10 whitespace-pre-wrap text-sm">
+                    {status?.error || 'An unexpected error occurred during processing. Please verify the video has an audio/speech track and try again.'}
                   </p>
                 </div>
                 <Button

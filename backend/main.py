@@ -26,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import shutil
+import re
+import aiofiles
 
 from jobs import JOB_STORE
 from video_utils import STYLE_PRESETS
@@ -107,25 +109,32 @@ async def upload_video(
     embed_captions: bool = False,
 ):
     """
-    Stage 1: Save video, probe duration, extract audio, and auto-detect language.
+    Stage 1: Save video asynchronously, probe duration, extract audio, and auto-detect language.
     Returns job_id. Job pauses at 'awaiting_user_confirmation'.
     """
     job_id = str(uuid.uuid4())
-    ext = file.filename.rsplit(".", 1)[-1]
+    raw_filename = file.filename or "video.mp4"
+    ext = "mp4"
+    if "." in raw_filename:
+        ext = raw_filename.rsplit(".", 1)[-1].lower()
+    ext = re.sub(r"[^a-z0-9]", "", ext) or "mp4"
     file_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.{ext}"))
 
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Asynchronously stream uploaded chunks to disk (1MB chunks) so the event loop never blocks
+        async with aiofiles.open(file_path, "wb") as buffer:
+            while chunk := await file.read(1024 * 1024):
+                await buffer.write(chunk)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+        logger.error(f"Failed to save uploaded video {raw_filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save file on server disk: {e}")
 
     # Register the job in the in-memory store
     JOB_STORE[job_id] = {
         "status": "processing",
         "progress": 0,
         "eta_seconds": 15,
-        "filename": file.filename,
+        "filename": raw_filename,
         "embed_captions": embed_captions,
     }
 
@@ -137,7 +146,7 @@ async def upload_video(
         "status": "processing",
         "progress": 0,
         "eta_seconds": 15,
-        "filename": file.filename,
+        "filename": raw_filename,
     }
 
 
@@ -281,6 +290,12 @@ async def get_status(job_id: str):
     }
 
 
+def _fast_file_copy(src: str, dst: str):
+    """High-speed buffered file copy using 4MB chunks for instant disk writes."""
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        shutil.copyfileobj(fsrc, fdst, length=4 * 1024 * 1024)
+
+
 @router.get("/download/{job_id}")
 async def download_srt(job_id: str):
     job_data = JOB_STORE.get(job_id)
@@ -290,7 +305,12 @@ async def download_srt(job_id: str):
     srt_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}.srt"))
     if os.path.exists(srt_path):
         base_name = os.path.splitext(job_data.get("filename", "captions"))[0]
-        return FileResponse(srt_path, filename=f"{base_name}.srt", media_type="application/x-subrip")
+        return FileResponse(
+            srt_path,
+            filename=f"{base_name}.srt",
+            media_type="application/x-subrip",
+            content_disposition_type="attachment",
+        )
     raise HTTPException(status_code=404, detail="SRT file generation in progress or failed.")
 
 
@@ -313,7 +333,7 @@ async def download_srt_to_disk(
     try:
         dest_path = os.path.abspath(dest_path)
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        shutil.copy2(srt_path, dest_path)
+        _fast_file_copy(srt_path, dest_path)
         logger.info(f"SRT saved to disk: {dest_path}")
         return {"success": True, "saved_to": dest_path}
     except Exception as e:
@@ -330,7 +350,13 @@ async def download_burned_video(job_id: str):
     video_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{job_id}_burned.mp4"))
     if os.path.exists(video_path):
         original_name = os.path.splitext(job_data.get("filename", "video"))[0]
-        return FileResponse(video_path, filename=f"{original_name}_captioned.mp4", media_type="video/mp4")
+        return FileResponse(
+            video_path,
+            filename=f"{original_name}_captioned.mp4",
+            media_type="video/mp4",
+            content_disposition_type="attachment",
+            headers={"Accept-Ranges": "bytes"},
+        )
     raise HTTPException(status_code=404, detail="Processed video not found.")
 
 
@@ -355,7 +381,7 @@ async def download_video_to_disk(
         dest_path = os.path.abspath(dest_path)
         dest_dir = os.path.dirname(dest_path)
         os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy2(video_path, dest_path)
+        _fast_file_copy(video_path, dest_path)
         logger.info(f"Video saved to disk: {dest_path}")
 
         # Also copy matching .SRT file alongside the video!
@@ -364,7 +390,7 @@ async def download_video_to_disk(
         if os.path.exists(srt_path):
             base_name, _ = os.path.splitext(dest_path)
             srt_dest = f"{base_name}.srt"
-            shutil.copy2(srt_path, srt_dest)
+            _fast_file_copy(srt_path, srt_dest)
             logger.info(f"Matching SRT saved to disk alongside video: {srt_dest}")
 
         return {"success": True, "saved_to": dest_path, "srt_saved_to": srt_dest}

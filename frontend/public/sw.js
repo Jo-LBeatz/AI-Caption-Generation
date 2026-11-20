@@ -22,7 +22,16 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
   // Don't cache API calls
-  if (url.pathname.startsWith("/auth") || url.pathname.startsWith("/upload") || url.pathname.startsWith("/status") || url.pathname.startsWith("/download") || url.pathname.startsWith("/srt")) {
+  if (
+    url.pathname.startsWith("/api") ||
+    url.pathname.startsWith("/auth") ||
+    url.pathname.startsWith("/upload") ||
+    url.pathname.startsWith("/status") ||
+    url.pathname.startsWith("/download") ||
+    url.pathname.startsWith("/srt") ||
+    url.pathname.startsWith("/confirm-language") ||
+    url.pathname.startsWith("/server-info")
+  ) {
     return;
   }
   event.respondWith(

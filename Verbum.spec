@@ -113,6 +113,7 @@ a = Analysis(
         # Networking / Multipart / Encoding
         "python_multipart",
         "multipart",
+        "aiofiles",
         "anyio",
         "anyio._backends",
         "anyio._backends._asyncio",

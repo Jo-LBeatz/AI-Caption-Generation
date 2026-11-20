@@ -224,6 +224,30 @@ def build_ass_force_style(style_config: Optional[dict] = None) -> str:
     return ",".join(style_parts)
 
 
+_NVENC_AVAILABLE = None
+
+def has_nvenc_encoder(ffmpeg_bin: str) -> bool:
+    """
+    Probe if NVIDIA NVENC hardware encoder is supported and active.
+    Works independently of PyTorch build by directly testing FFmpeg with the NVIDIA GPU driver.
+    """
+    global _NVENC_AVAILABLE
+    if _NVENC_AVAILABLE is not None:
+        return _NVENC_AVAILABLE
+    try:
+        res = subprocess.run(
+            [ffmpeg_bin, "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.04", "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        _NVENC_AVAILABLE = (res.returncode == 0)
+    except Exception as e:
+        logger.debug(f"NVENC probe failed: {e}")
+        _NVENC_AVAILABLE = False
+    return _NVENC_AVAILABLE
+
+
 def embed_subtitles(video_path, srt_path, output_path, style_config=None, progress_callback=None, eta_callback=None):
     """
     Burn subtitles (.srt) into a video (.mp4) using FFmpeg with customizable styles.
@@ -273,27 +297,33 @@ def embed_subtitles(video_path, srt_path, output_path, style_config=None, progre
         force_style_str = build_ass_force_style(style_config)
         sub_filter = f"subtitles='{escaped_srt}':force_style='{force_style_str}'"
 
-        # Try GPU NVENC acceleration first if CUDA is available
-        if torch and torch.cuda.is_available():
+        # Try GPU NVENC acceleration first (detected via hardware probe or PyTorch)
+        use_nvenc = has_nvenc_encoder(ffmpeg_bin) or bool(torch and torch.cuda.is_available())
+        if use_nvenc:
             try:
+                logger.info("Using NVIDIA NVENC hardware encoder for high-speed subtitle burning.")
                 gpu_cmd = [
                     ffmpeg_bin, "-y",
                     "-i", video_path,
                     "-vf", sub_filter,
                     "-vcodec", "h264_nvenc",
                     "-acodec", "copy",
-                    "-preset", "p1",
+                    "-preset", "p2",
+                    "-rc:v", "vbr",
+                    "-cq", "22",
+                    "-b:v", "0",
                     "-pix_fmt", "yuv420p",
                     "-progress", "pipe:1",
                     output_path,
                 ]
-                if run_ffmpeg_cmd(gpu_cmd) and os.path.exists(output_path):
+                if run_ffmpeg_cmd(gpu_cmd) and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
                     logger.info(f"Subtitles burned via GPU NVENC successfully. Output: {output_path}")
                     return True
             except Exception as gpu_err:
                 logger.warning(f"GPU NVENC burn-in failed ({gpu_err}). Falling back to CPU ultrafast.")
 
         # Multi-threaded CPU ultrafast encoding fallback
+        logger.info("Using multi-threaded CPU x264 encoding for subtitle burning.")
         cpu_cmd = [
             ffmpeg_bin, "-y",
             "-i", video_path,
@@ -302,12 +332,13 @@ def embed_subtitles(video_path, srt_path, output_path, style_config=None, progre
             "-acodec", "copy",
             "-preset", "ultrafast",
             "-tune", "fastdecode",
+            "-crf", "22",
             "-threads", "0",
             "-pix_fmt", "yuv420p",
             "-progress", "pipe:1",
             output_path,
         ]
-        if run_ffmpeg_cmd(cpu_cmd) and os.path.exists(output_path):
+        if run_ffmpeg_cmd(cpu_cmd) and os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             logger.info(f"Subtitles burned successfully. Output: {output_path}")
             return True
 

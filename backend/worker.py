@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import threading
+import subprocess
 import ffmpeg
 import logging
 import re
@@ -82,13 +83,26 @@ _model_dict = None
 _model_lock = threading.Lock()
 
 
+def is_cuda_available() -> bool:
+    """Check if CUDA GPU acceleration is available via CTranslate2 or PyTorch."""
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return True
+    except Exception:
+        pass
+    if torch and hasattr(torch, "cuda") and torch.cuda.is_available():
+        return True
+    return False
+
+
 def get_model():
     global _model_dict
     with _model_lock:
         if _model_dict is None:
-            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+            cuda_ok = is_cuda_available()
+            preferred_device = "cuda" if cuda_ok else "cpu"
             if HAS_FASTER_WHISPER:
-                compute_type = "float16" if device == "cuda" else "int8"
                 cpu_threads = os.cpu_count() or 4
                 
                 # Priority list of models to try
@@ -99,40 +113,55 @@ def get_model():
                     candidate_models.append("base")
 
                 for candidate in candidate_models:
-                    try:
-                        logger.info(
-                            f"Loading faster-whisper CTranslate2 model '{candidate}' "
-                            f"on device '{device}' (compute_type={compute_type}, threads={cpu_threads})"
-                        )
-                        instance = FasterWhisperModel(
-                            candidate,
-                            device=device,
-                            compute_type=compute_type,
-                            cpu_threads=cpu_threads,
-                            num_workers=2,
-                        )
-                        _model_dict = {
-                            "type": "faster",
-                            "instance": instance,
-                            "device": device,
-                            "model_name": candidate,
-                        }
-                        logger.info(f"Successfully initialized faster-whisper with '{candidate}'")
+                    # Try CUDA first if available, then fallback to CPU
+                    device_attempts = [preferred_device]
+                    if preferred_device == "cuda":
+                        device_attempts.append("cpu")
+
+                    loaded = False
+                    for dev in device_attempts:
+                        compute_type = "float16" if dev == "cuda" else "int8"
+                        try:
+                            logger.info(
+                                f"Loading faster-whisper CTranslate2 model '{candidate}' "
+                                f"on device '{dev}' (compute_type={compute_type}, threads={cpu_threads})"
+                            )
+                            instance = FasterWhisperModel(
+                                candidate,
+                                device=dev,
+                                compute_type=compute_type,
+                                cpu_threads=cpu_threads,
+                                num_workers=2,
+                            )
+                            _model_dict = {
+                                "type": "faster",
+                                "instance": instance,
+                                "device": dev,
+                                "model_name": candidate,
+                            }
+                            logger.info(f"Successfully initialized faster-whisper with '{candidate}' on {dev.upper()}")
+                            loaded = True
+                            break
+                        except Exception as e:
+                            logger.warning(f"Could not load faster-whisper model '{candidate}' on '{dev}': {e}")
+                    if loaded:
                         break
-                    except Exception as e:
-                        logger.warning(f"Could not load faster-whisper model '{candidate}': {e}")
 
             if _model_dict is None and whisper is not None:
+                device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
                 if device == "cpu" and torch:
                     torch.set_num_threads(os.cpu_count() or 4)
                 logger.info(f"Loading openai-whisper model '{MODEL_NAME}' on device '{device}'")
-                instance = whisper.load_model(MODEL_NAME, device=device)
-                _model_dict = {
-                    "type": "openai",
-                    "instance": instance,
-                    "device": device,
-                    "model_name": MODEL_NAME,
-                }
+                try:
+                    instance = whisper.load_model(MODEL_NAME, device=device)
+                    _model_dict = {
+                        "type": "openai",
+                        "instance": instance,
+                        "device": device,
+                        "model_name": MODEL_NAME,
+                    }
+                except Exception as e:
+                    logger.warning(f"Could not load openai-whisper model: {e}")
 
             if _model_dict is None:
                 groq_key = os.getenv("GROQ_API_KEY")
@@ -345,17 +374,34 @@ def extract_and_detect(job_id: str, video_path: str, embed_captions: bool):
         audio_path = f"{video_path}.wav"
         ffmpeg_bin = get_ffmpeg_bin()
         try:
-            ffmpeg.input(video_path).audio.output(
-                audio_path, acodec="pcm_s16le", ac=1, ar="16k"
-            ).run(cmd=ffmpeg_bin, overwrite_output=True, quiet=True)
-        except ffmpeg.Error as e:
-            stderr_msg = e.stderr.decode("utf-8", errors="ignore") if hasattr(e, "stderr") and e.stderr else str(e)
-            logger.error(f"FFmpeg audio extraction error: {stderr_msg}")
-            JOB_STORE[job_id].update({"status": "failed", "error": f"FFmpeg error: {stderr_msg}"})
-            return
+            # Bulletproof audio extraction via direct subprocess
+            extract_cmd = [
+                ffmpeg_bin, "-y",
+                "-i", video_path,
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                audio_path,
+            ]
+            res = subprocess.run(
+                extract_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if res.returncode != 0 or not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+                err_text = res.stderr or ""
+                if "does not contain any stream" in err_text or "Output file #0" in err_text or "Stream map" in err_text:
+                    raise RuntimeError("The uploaded video does not contain an audio track (it is silent). Please upload a video with speech or audio.")
+                lines = [l.strip() for l in err_text.strip().splitlines() if l.strip() and not l.startswith("built with") and not l.startswith("configuration:") and not l.startswith("ffmpeg version") and not l.startswith("lib")]
+                last_err = " ".join(lines[-2:]) if lines else "Invalid video file or corrupt stream."
+                raise RuntimeError(f"Could not extract audio track: {last_err}")
         except Exception as e:
-            logger.error(f"Audio extraction error: {e}")
-            JOB_STORE[job_id].update({"status": "failed", "error": f"FFmpeg error: {str(e)}"})
+            err_msg = str(e) or "Failed to extract audio from video."
+            logger.error(f"Audio extraction error: {err_msg}")
+            JOB_STORE[job_id].update({"status": "failed", "error": err_msg})
             return
 
         # --- Detect Language ---
@@ -683,6 +729,10 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         srt_segments, full_text = format_srt_cues(
             raw_segments_list, max_lines=2, max_chars_per_line=40, uppercase=is_uppercase
         )
+        if not srt_segments:
+            logger.info(f"Job {job_id}: No distinct speech words parsed, generating fallback cue.")
+            srt_segments = ["1\n00:00:00,000 --> 00:00:05,000\n[No spoken speech detected]\n"]
+            full_text = ["[No spoken speech detected]"]
 
         # --- Save SRT File ---
         JOB_STORE[job_id].update({"status": "generating_srt", "progress": 73, "eta_seconds": 3})
