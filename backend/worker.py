@@ -210,8 +210,18 @@ def ensure_ffmpeg_on_path() -> str:
 def get_upload_dir() -> str:
     upload_dir = os.getenv("UPLOAD_DIR")
     if not upload_dir:
-        upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
-    os.makedirs(upload_dir, exist_ok=True)
+        # On serverless environments (Vercel / AWS Lambda), root filesystem is read-only.
+        # Fall back to writable /tmp directory.
+        if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or (os.path.exists("/tmp") and os.access("/tmp", os.W_OK)):
+            upload_dir = os.path.join("/tmp", "verbum_uploads")
+        else:
+            upload_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+    try:
+        os.makedirs(upload_dir, exist_ok=True)
+    except OSError:
+        import tempfile
+        upload_dir = os.path.join(tempfile.gettempdir(), "verbum_uploads")
+        os.makedirs(upload_dir, exist_ok=True)
     return upload_dir
 
 

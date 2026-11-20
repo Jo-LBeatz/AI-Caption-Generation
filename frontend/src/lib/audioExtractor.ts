@@ -115,8 +115,16 @@ export async function extractAudioFromVideo(
   videoFile: File,
   onProgress?: (message: string) => void
 ): Promise<File> {
-  onProgress?.('Extracting audio track in browser...');
-  const arrayBuffer = await videoFile.arrayBuffer();
+  onProgress?.('Reading video file in browser...');
+  let arrayBuffer: ArrayBuffer;
+  try {
+    arrayBuffer = await videoFile.arrayBuffer();
+  } catch (readErr: any) {
+    throw new Error(
+      `Browser could not read the video file directly: ${readErr?.message || 'File access locked'}. ` +
+      `Please ensure the video is not open in another player, or use the Verbum desktop software.`
+    );
+  }
 
   const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
   if (!AudioCtx) {
@@ -133,6 +141,11 @@ export async function extractAudioFromVideo(
 
     const baseName = videoFile.name.replace(/\.[^/.]+$/, '');
     return new File([wavBlob], `${baseName}.wav`, { type: 'audio/wav' });
+  } catch (decodeErr: any) {
+    throw new Error(
+      `Audio decoding error in browser: ${decodeErr?.message || 'Video container format not supported'}. ` +
+      `For direct multi-format video transcription, run the Verbum desktop application.`
+    );
   } finally {
     try {
       audioCtx.close();

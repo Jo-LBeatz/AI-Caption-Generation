@@ -339,8 +339,18 @@ export default function App() {
       try {
         setClientAudioStatus('Extracting audio track for cloud upload...');
         targetFile = await extractAudioFromVideo(file, (msg) => setClientAudioStatus(msg));
-      } catch (extractErr) {
-        console.warn('Client audio extraction failed, attempting direct upload:', extractErr);
+      } catch (extractErr: any) {
+        console.warn('Client audio extraction failed:', extractErr);
+        setClientAudioStatus(null);
+        alert(
+          `Cloud Upload Notice:\n\n` +
+          `Your video file (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds Vercel's 4.5 MB serverless limit, and browser audio extraction could not read it directly.\n\n` +
+          `• Cause: The file may be currently open in another player/editor, or browser memory is full.\n` +
+          `• Recommendation: Please run the Verbum Desktop Software on your PC for 100% offline GPU processing with no file size limits.`
+        );
+        setIsUploading(false);
+        setUploadProgress(null);
+        return;
       }
     }
 
@@ -391,10 +401,20 @@ export default function App() {
       setCountdownSecs(response.data.eta_seconds || 15);
     } catch (error: any) {
       console.error('Upload error:', error);
+      const rawMsg = String(error.response?.data?.detail || error.message || '');
       if (error.response?.status === 413) {
         alert(
-          `Cloud Upload Limit (4.5 MB): This file is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds Vercel's serverless function limit of 4.5 MB.\n\n` +
+          `Cloud Upload Limit (4.5 MB):\n\nThis file is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds Vercel's serverless function limit of 4.5 MB.\n\n` +
           `To process full 4K/1080p videos with high-speed GPU burning and no size limits, please use the Verbum desktop application.`
+        );
+      } else if (rawMsg.toLowerCase().includes('permission problems') || rawMsg.toLowerCase().includes('could not be read')) {
+        alert(
+          `File Access Error:\n\n` +
+          `The browser could not read "${file.name}".\n\n` +
+          `Common causes:\n` +
+          `1. The video file is currently open in a media player, video editor, or another app.\n` +
+          `2. The file was moved, renamed, or temporarily locked by an antivirus scan.\n\n` +
+          `Please close any apps using the file, re-select it, or use the Verbum desktop application.`
         );
       } else {
         const detailMsg = error.response?.data?.detail || error.message || 'Network communication error';
@@ -585,6 +605,13 @@ export default function App() {
           <p className="text-stone-400 text-sm md:text-base font-medium max-w-lg">
             Sacred clarity, high-precision multilingual speech-to-text, and video caption generation.
           </p>
+
+          {/* Cloud Edition Pill */}
+          {isCloudDeployment() && (
+            <div className="mt-3 inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-amber-950/40 border border-amber-500/30 text-[11px] font-medium text-amber-300 shadow-sm">
+              <span>☁️ Cloud Preview (4.5 MB Limit) • For unlimited video size & GPU burning, run the Verbum Desktop App</span>
+            </div>
+          )}
 
           {/* Mobile Connect Pill */}
           {serverIp && (

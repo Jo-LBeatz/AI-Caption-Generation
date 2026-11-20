@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def get_db_path() -> str:
-    """Return the correct path for the SQLite database in both dev and frozen modes."""
+    """Return the correct path for the SQLite database in both dev, frozen, and cloud modes."""
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or (os.path.exists("/tmp") and os.access("/tmp", os.W_OK)):
+        return "/tmp/regulavitae.db"
     if getattr(sys, "frozen", False):
         # Installed app — use %APPDATA% so we never write into the
         # read-only Program Files directory.
