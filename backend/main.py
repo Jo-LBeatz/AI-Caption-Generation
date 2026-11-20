@@ -20,7 +20,7 @@ import logging
 import threading
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 # App init
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Verbum API", description="AI Caption Generation Engine with Catholic Ambiance")
+router = APIRouter()
 
 # ---------------------------------------------------------------------------
 # CORS
@@ -89,7 +90,7 @@ def _get_local_ip() -> str:
 # ---------------------------------------------------------------------------
 # Core endpoints
 # ---------------------------------------------------------------------------
-@app.get("/server-info")
+@router.get("/server-info")
 async def get_server_info():
     """Return local LAN IP and application metadata for phone connectivity."""
     return {
@@ -99,7 +100,7 @@ async def get_server_info():
     }
 
 
-@app.post("/upload")
+@router.post("/upload")
 async def upload_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -164,13 +165,13 @@ class LanguageConfirmation(BaseModel):
     caption_style: Optional[CaptionStyleConfig] = None
 
 
-@app.get("/caption-style-presets")
+@router.get("/caption-style-presets")
 async def get_caption_style_presets():
     """Return available high-level caption aesthetic presets."""
     return STYLE_PRESETS
 
 
-@app.post("/confirm-language/{job_id}")
+@router.post("/confirm-language/{job_id}")
 async def confirm_language(
     job_id: str,
     body: LanguageConfirmation,
@@ -223,7 +224,7 @@ async def confirm_language(
     return {"status": "transcription_started", "language": body.language, "accent_id": body.accent_id}
 
 
-@app.post("/proceed-despite-warning/{job_id}")
+@router.post("/proceed-despite-warning/{job_id}")
 async def proceed_despite_warning(job_id: str):
     """
     User acknowledged the moral law warning and elected to proceed anyway.
@@ -240,7 +241,7 @@ async def proceed_despite_warning(job_id: str):
     return {"status": "resumed"}
 
 
-@app.post("/cancel-job/{job_id}")
+@router.post("/cancel-job/{job_id}")
 async def cancel_job_endpoint(job_id: str):
     """
     User chose to cancel and discard the video after moral warning.
@@ -253,7 +254,7 @@ async def cancel_job_endpoint(job_id: str):
     return {"status": "cancelled"}
 
 
-@app.get("/status/{job_id}")
+@router.get("/status/{job_id}")
 async def get_status(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -280,7 +281,7 @@ async def get_status(job_id: str):
     }
 
 
-@app.get("/download/{job_id}")
+@router.get("/download/{job_id}")
 async def download_srt(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -293,7 +294,7 @@ async def download_srt(job_id: str):
     raise HTTPException(status_code=404, detail="SRT file generation in progress or failed.")
 
 
-@app.post("/download-srt-to-disk/{job_id}")
+@router.post("/download-srt-to-disk/{job_id}")
 async def download_srt_to_disk(
     job_id: str,
     dest_path: str = Query(..., description="Absolute path where the SRT file should be saved"),
@@ -320,7 +321,7 @@ async def download_srt_to_disk(
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
 
-@app.get("/download-video/{job_id}")
+@router.get("/download-video/{job_id}")
 async def download_burned_video(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -333,7 +334,7 @@ async def download_burned_video(job_id: str):
     raise HTTPException(status_code=404, detail="Processed video not found.")
 
 
-@app.post("/download-video-to-disk/{job_id}")
+@router.post("/download-video-to-disk/{job_id}")
 async def download_video_to_disk(
     job_id: str,
     dest_path: str = Query(..., description="Absolute path where the video should be saved"),
@@ -372,7 +373,7 @@ async def download_video_to_disk(
         raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
 
 
-@app.get("/srt/{job_id}")
+@router.get("/srt/{job_id}")
 async def get_srt_content(job_id: str):
     job_data = JOB_STORE.get(job_id)
     if not job_data:
@@ -383,6 +384,13 @@ async def get_srt_content(job_id: str):
         with open(srt_path, "r", encoding="utf-8") as f:
             return {"content": f.read()}
     raise HTTPException(status_code=404, detail="SRT content not found.")
+
+
+# ---------------------------------------------------------------------------
+# Mount API Router (supports both /api prefix for Vercel/proxies and root)
+# ---------------------------------------------------------------------------
+app.include_router(router, prefix="/api")
+app.include_router(router)
 
 
 # ---------------------------------------------------------------------------

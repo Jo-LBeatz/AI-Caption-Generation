@@ -31,7 +31,7 @@ import {
 
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
-  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:8000');
+  (typeof window !== 'undefined' ? `${window.location.origin}/api` : '/api');
 
 interface TopCandidate {
   language: string;

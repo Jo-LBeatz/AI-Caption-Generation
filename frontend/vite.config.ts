@@ -13,6 +13,12 @@ export default defineConfig({
   server: {
     port: 3000,
     host: true, // Needed for Docker
+    proxy: {
+      '/api': {
+        target: process.env.BACKEND_URL || process.env.VITE_API_URL || 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     port: 3000,
