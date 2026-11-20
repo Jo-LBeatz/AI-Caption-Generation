@@ -2,7 +2,10 @@ import ffmpeg
 import os
 import sys
 import logging
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +274,7 @@ def embed_subtitles(video_path, srt_path, output_path, style_config=None, progre
         sub_filter = f"subtitles='{escaped_srt}':force_style='{force_style_str}'"
 
         # Try GPU NVENC acceleration first if CUDA is available
-        if torch.cuda.is_available():
+        if torch and torch.cuda.is_available():
             try:
                 gpu_cmd = [
                     ffmpeg_bin, "-y",

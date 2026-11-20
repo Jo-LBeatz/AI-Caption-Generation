@@ -19,9 +19,13 @@ import time
 import threading
 import ffmpeg
 import logging
-import numpy as np
-import torch
 import re
+from typing import Optional, Dict, Any, List
+import numpy as np
+try:
+    import torch
+except ImportError:
+    torch = None
 
 def sanitize_caption_text(text: str) -> str:
     """
@@ -82,7 +86,7 @@ def get_model():
     global _model_dict
     with _model_lock:
         if _model_dict is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
             if HAS_FASTER_WHISPER:
                 compute_type = "float16" if device == "cuda" else "int8"
                 cpu_threads = os.cpu_count() or 4
@@ -118,10 +122,8 @@ def get_model():
                     except Exception as e:
                         logger.warning(f"Could not load faster-whisper model '{candidate}': {e}")
 
-            if _model_dict is None:
-                if whisper is None:
-                    raise RuntimeError("Neither faster-whisper nor openai-whisper is installed.")
-                if device == "cpu":
+            if _model_dict is None and whisper is not None:
+                if device == "cpu" and torch:
                     torch.set_num_threads(os.cpu_count() or 4)
                 logger.info(f"Loading openai-whisper model '{MODEL_NAME}' on device '{device}'")
                 instance = whisper.load_model(MODEL_NAME, device=device)
@@ -131,6 +133,24 @@ def get_model():
                     "device": device,
                     "model_name": MODEL_NAME,
                 }
+
+            if _model_dict is None:
+                groq_key = os.getenv("GROQ_API_KEY")
+                openai_key = os.getenv("OPENAI_API_KEY")
+                if groq_key or openai_key:
+                    _model_dict = {
+                        "type": "cloud",
+                        "provider": "groq" if groq_key else "openai",
+                        "device": "cloud",
+                        "model_name": "whisper-large-v3-turbo" if groq_key else "whisper-1",
+                    }
+                    logger.info(f"Initialized cloud transcription via {_model_dict['provider'].upper()} Whisper API")
+                else:
+                    raise RuntimeError(
+                        "No local Whisper engine (faster-whisper/openai-whisper) found. "
+                        "For cloud deployment on Vercel, set GROQ_API_KEY or OPENAI_API_KEY in your Vercel project environment variables. "
+                        "For offline on-device processing, run the Verbum desktop application."
+                    )
     return _model_dict
 
 
@@ -200,7 +220,13 @@ def detect_language_from_audio(audio_path: str) -> dict:
         logger.warning(f"Could not extract 30s sample for language detection ({e}), using full audio.")
 
     try:
-        if model_type == "faster":
+        if model_type == "cloud":
+            return {
+                "language": "en",
+                "probability": 95.0,
+                "top_candidates": [{"language": "en", "probability": 95.0}],
+            }
+        elif model_type == "faster":
             segments, info = model.transcribe(
                 target_audio,
                 beam_size=5,
@@ -485,6 +511,56 @@ def format_srt_cues(raw_segments, max_lines: int = 2, max_chars_per_line: int = 
     return srt_blocks, full_text_list
 
 
+def transcribe_via_cloud_api(
+    audio_path: str,
+    language: Optional[str] = None,
+    accent_id: str = "none",
+    provider: str = "groq",
+):
+    """
+    Transcribes audio using a high-speed cloud Whisper API (Groq or OpenAI).
+    Used when running in serverless environments like Vercel where local PyTorch is not bundled.
+    """
+    import httpx
+    prompt = build_initial_prompt(language or "en", accent_id)
+    if provider == "groq":
+        api_key = os.getenv("GROQ_API_KEY")
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3-turbo"
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        model = "whisper-1"
+
+    if not api_key:
+        raise RuntimeError(
+            f"{provider.upper()}_API_KEY environment variable is not set. "
+            f"Please set GROQ_API_KEY or OPENAI_API_KEY in your Vercel Project Environment Variables."
+        )
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    with open(audio_path, "rb") as f:
+        files = {"file": (os.path.basename(audio_path), f, "audio/wav")}
+        data = {
+            "model": model,
+            "response_format": "verbose_json",
+        }
+        if language and language != "auto":
+            data["language"] = language
+        if prompt:
+            data["prompt"] = prompt
+
+        with httpx.Client(timeout=120.0) as client:
+            resp = client.post(url, headers=headers, files=files, data=data)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Cloud transcription error ({resp.status_code}): {resp.text}")
+            result = resp.json()
+
+    final_lang = result.get("language", language or "en")
+    raw_segments = result.get("segments", [])
+    return raw_segments, final_lang
+
+
 # ---------------------------------------------------------------------------
 # Stage 2: Transcribe with confirmed language + accent
 # ---------------------------------------------------------------------------
@@ -528,7 +604,14 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
         raw_segments_list = []
         final_lang = language
 
-        if model_type == "faster":
+        if model_type == "cloud":
+            provider = model_info.get("provider", "groq")
+            JOB_STORE[job_id].update({"progress": 45, "eta_seconds": 5})
+            raw_segments_list, final_lang = transcribe_via_cloud_api(
+                audio_path, language=language, accent_id=accent_id, provider=provider
+            )
+            JOB_STORE[job_id].update({"progress": 72, "eta_seconds": 2})
+        elif model_type == "faster":
             lang_param = language if language and language != "auto" else None
             prompt = build_initial_prompt(language, accent_id)
 
@@ -572,7 +655,7 @@ def transcribe_confirmed(job_id: str, language: str, accent_id: str):
                     })
 
         else:
-            is_cuda = torch.cuda.is_available()
+            is_cuda = bool(torch and torch.cuda.is_available())
             transcribe_kwargs = {
                 "verbose": False,
                 "task": "transcribe",
