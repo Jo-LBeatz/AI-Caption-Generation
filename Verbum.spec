@@ -8,7 +8,7 @@
 
 import sys
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
@@ -30,11 +30,31 @@ try:
 except Exception:
     ctranslate2_libs = []
 
-# Collect pywebview data files if present
+# Collect pywebview data files, dynamic libraries and submodules
 try:
     webview_datas = collect_data_files("webview")
+    webview_libs = collect_dynamic_libs("webview")
+    webview_submodules = [s for s in collect_submodules("webview") if "android" not in s]
 except Exception:
     webview_datas = []
+    webview_libs = []
+    webview_submodules = []
+
+try:
+    pythonnet_datas = collect_data_files("pythonnet")
+    pythonnet_libs = collect_dynamic_libs("pythonnet")
+    pythonnet_submodules = collect_submodules("pythonnet")
+except Exception:
+    pythonnet_datas = []
+    pythonnet_libs = []
+    pythonnet_submodules = []
+
+try:
+    clr_loader_datas = collect_data_files("clr_loader")
+    clr_loader_libs = collect_dynamic_libs("clr_loader")
+except Exception:
+    clr_loader_datas = []
+    clr_loader_libs = []
 
 a = Analysis(
     ["backend/launcher.py"],
@@ -44,7 +64,7 @@ a = Analysis(
     binaries=[
         # Bundle ffmpeg.exe into the bin/ subdirectory of the package
         ("backend/bin/ffmpeg.exe", "bin"),
-    ] + ctranslate2_libs,
+    ] + ctranslate2_libs + webview_libs + pythonnet_libs + clr_loader_libs,
     datas=[
         # React production build
         ("frontend/dist", "frontend_dist"),
@@ -56,7 +76,7 @@ a = Analysis(
         ("backend/video_utils.py", "."),
         ("backend/worker.py",      "."),
         ("backend/main.py",        "."),
-    ] + whisper_datas + tiktoken_datas + faster_whisper_datas + webview_datas,
+    ] + whisper_datas + tiktoken_datas + faster_whisper_datas + webview_datas + pythonnet_datas + clr_loader_datas,
     hiddenimports=[
         # Entry point modules
         "main",
@@ -79,7 +99,10 @@ a = Analysis(
         "faster_whisper",
         "ctranslate2",
         "tokenizers",
-        # Webview
+        # .NET runtime and webview
+        "clr",
+        "clr_loader",
+        "pythonnet",
         "webview",
         "webview.platforms",
         "webview.platforms.winforms",
@@ -123,7 +146,7 @@ a = Analysis(
         "httpx",
         "PIL",
         "PIL.Image",
-    ],
+    ] + webview_submodules + pythonnet_submodules,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

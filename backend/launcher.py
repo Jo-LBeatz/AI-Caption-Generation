@@ -70,11 +70,11 @@ HOST = "127.0.0.1"
 # Dynamic Free Port Discovery
 # ---------------------------------------------------------------------------
 def _find_free_port(start_port: int = 8000) -> int:
-    """Find the first available TCP port starting from start_port."""
+    """Find the first available TCP port starting from start_port, testing 0.0.0.0 binding."""
     for port in range(start_port, start_port + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s.bind((HOST, port))
+                s.bind(("0.0.0.0", port))
                 return port
             except OSError:
                 continue
@@ -135,22 +135,23 @@ def _start_uvicorn():
 
 
 def _wait_for_server(timeout: float = 30.0) -> bool:
-    """Poll server URL until it responds or error/timeout occurs."""
+    """Poll server URL until it responds with Verbum server-info or error/timeout occurs."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _SERVER_ERROR is not None:
             logger.error(f"Server thread failed early: {_SERVER_ERROR}")
             return False
-        try:
-            req = urllib.request.Request(URL, headers={"User-Agent": "RegulaVitaeLauncher/1.0"})
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                if resp.status in (200, 301, 302, 307, 404):
-                    return True
-        except urllib.error.HTTPError:
-            # HTTP response from server means server is listening!
-            return True
-        except Exception:
-            time.sleep(0.3)
+        for endpoint in [f"{URL}/api/server-info", f"{URL}/server-info"]:
+            try:
+                req = urllib.request.Request(endpoint, headers={"User-Agent": "VerbumLauncher/1.0"})
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                    if resp.status == 200:
+                        content = resp.read().decode("utf-8", errors="ignore")
+                        if "Verbum" in content:
+                            return True
+            except Exception:
+                pass
+        time.sleep(0.3)
     return False
 
 
@@ -300,7 +301,8 @@ if __name__ == "__main__":
         webbrowser.open(URL)
         logger.info("App is running. Close this terminal or kill the process to stop.")
         try:
-            server_thread.join()
+            while server_thread.is_alive():
+                time.sleep(1)
         except KeyboardInterrupt:
             pass
 

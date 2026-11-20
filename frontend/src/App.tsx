@@ -28,6 +28,7 @@ import {
   CAPTION_PRESETS,
   type CaptionStyleConfig,
 } from '@/components/CaptionStylePicker';
+import { extractAudioFromVideo, isCloudDeployment } from '@/lib/audioExtractor';
 
 const API_BASE_URL =
   import.meta.env.VITE_API_URL ||
@@ -192,6 +193,7 @@ export default function App() {
   const [countdownSecs, setCountdownSecs] = useState<number | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [clientAudioStatus, setClientAudioStatus] = useState<string | null>(null);
   const [downloadingState, setDownloadingState] = useState<'video' | 'srt' | 'both' | null>(null);
   const [srtContent, setSrtContent] = useState<string>('');
   const [embedCaptions, setEmbedCaptions] = useState(false);
@@ -324,18 +326,29 @@ export default function App() {
 
     setIsUploading(true);
     setUploadProgress(0);
+    setClientAudioStatus(null);
     setSrtContent('');
     setCountdownSecs(null);
     setAlarmMuted(false);
     alarmSounder.stop();
 
-    const formData = new FormData();
-    formData.append('file', file);
+    let targetFile: File = file;
+    // On cloud deployment (e.g. Vercel), if file is larger than 4.2MB, extract audio client-side
+    // to prevent hitting Vercel's 4.5MB serverless payload limit
+    if (isCloudDeployment() && file.size > 4.2 * 1024 * 1024) {
+      try {
+        setClientAudioStatus('Extracting audio track for cloud upload...');
+        targetFile = await extractAudioFromVideo(file, (msg) => setClientAudioStatus(msg));
+      } catch (extractErr) {
+        console.warn('Client audio extraction failed, attempting direct upload:', extractErr);
+      }
+    }
 
-    try {
-      // NOTE: Never manually set 'Content-Type': 'multipart/form-data' in Axios
-      // Omitting it allows Axios/browser to automatically insert the exact multipart boundary
-      const response = await axios.post(
+    const doUpload = async (fileToUpload: File) => {
+      const formData = new FormData();
+      formData.append('file', fileToUpload);
+
+      return await axios.post(
         `${API_BASE_URL}/upload?embed_captions=${embedCaptions}`,
         formData,
         {
@@ -348,6 +361,23 @@ export default function App() {
           },
         }
       );
+    };
+
+    try {
+      let response;
+      try {
+        response = await doUpload(targetFile);
+      } catch (firstErr: any) {
+        // If 413 Payload Too Large occurred on a video that wasn't extracted yet, attempt browser audio extraction
+        if (firstErr.response?.status === 413 && targetFile === file) {
+          setClientAudioStatus('Vercel 4.5MB payload limit detected. Extracting audio in browser...');
+          const audioFile = await extractAudioFromVideo(file, (msg) => setClientAudioStatus(msg));
+          response = await doUpload(audioFile);
+        } else {
+          throw firstErr;
+        }
+      }
+
       const newJobId = response.data.job_id;
       setJobId(newJobId);
       setStatus({
@@ -361,11 +391,19 @@ export default function App() {
       setCountdownSecs(response.data.eta_seconds || 15);
     } catch (error: any) {
       console.error('Upload error:', error);
-      const detailMsg = error.response?.data?.detail || error.message || 'Network communication error';
-      alert(`Upload Failed: ${detailMsg}\n\nPlease verify your connection and try again.`);
+      if (error.response?.status === 413) {
+        alert(
+          `Cloud Upload Limit (4.5 MB): This file is ${(file.size / (1024 * 1024)).toFixed(1)} MB, which exceeds Vercel's serverless function limit of 4.5 MB.\n\n` +
+          `To process full 4K/1080p videos with high-speed GPU burning and no size limits, please use the Verbum desktop application.`
+        );
+      } else {
+        const detailMsg = error.response?.data?.detail || error.message || 'Network communication error';
+        alert(`Upload Failed: ${detailMsg}\n\nPlease verify your connection and try again.`);
+      }
     } finally {
       setIsUploading(false);
       setUploadProgress(null);
+      setClientAudioStatus(null);
     }
   };
 
@@ -508,6 +546,7 @@ export default function App() {
     setStatus(null);
     setCountdownSecs(null);
     setUploadProgress(null);
+    setClientAudioStatus(null);
     setDownloadingState(null);
     setSrtContent('');
     setIsConfirming(false);
@@ -661,7 +700,11 @@ export default function App() {
                   {isUploading ? (
                     <>
                       <Loader2 className="animate-spin mr-3" size={24} />
-                      {uploadProgress !== null ? `Uploading ${uploadProgress}%...` : 'Uploading & Analyzing...'}
+                      {clientAudioStatus
+                        ? clientAudioStatus
+                        : uploadProgress !== null
+                        ? `Uploading ${uploadProgress}%...`
+                        : 'Uploading & Analyzing...'}
                     </>
                   ) : (
                     <>✦ Generate Captions</>
